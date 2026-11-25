@@ -14,6 +14,18 @@ auto warmup = chain.warmupColumn("theta");
 
 Columns use the exact labels in the CSV, including one-based Stan indices such as `beta.1`. Both accessors return views into owned D storage. The input file can be closed or removed after reading.
 
+For a dense scalar, vector, or matrix, use the base variable name. The first axis is saved iteration. Variable coordinates use zero-based D indices.
+
+```d
+auto m = chain.variable("m");          // For a 2-by-3 matrix with n draws:
+auto shape = m.shape;                  // [n, 2, 3]
+auto strides = m.strides;              // [1, n, 2*n], in doubles
+assert(m.series(1, 2) is chain.column("m.2.3"));
+auto warmup = chain.warmupVariable("m");
+```
+
+`data` exposes the flat read-only slice for just this variable and phase. The view keeps that storage alive. Look up a view once before looping over its elements.
+
 ## Compile and sample
 
 Install [CmdStan](https://mc-stan.org/docs/cmdstan-guide/installation.html) and its GNU Make/C++ toolchain. The initial target releases are 2.39.0 and 2.40.0. Set `CMDSTAN` to the installation root or put a release under `~/.cmdstan/cmdstan-X.Y.Z`. An explicit installation uses `CmdStan.at(path)`. On Windows, make `mingw32-make`, the GNU toolchain and its runtime libraries available on PATH. Build staging and installation directories must have Make-compatible paths. Set `CompileOptions.stagingRoot` when the default temporary path contains spaces.

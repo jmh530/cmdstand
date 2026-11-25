@@ -51,7 +51,15 @@ void main(string[] args)
     assert(fit.chain(0).comments.canFind("model = " ~ stem ~ "_model"));
     assert(stem != "fixed_draws");
     auto fixedSource = buildPath(root, "fixed_draws.stan");
-    std.file.write(fixedSource, "generated quantities { real x = 42; }");
+    std.file.write(fixedSource, `generated quantities {
+        real x = 42;
+        vector[3] v;
+        matrix[2, 3] m;
+        for (j in 1:3) {
+            v[j] = 100 + j;
+            for (i in 1:2) m[i, j] = 10 * i + j;
+        }
+    }`);
     auto fixedModel = stan.compile(fixedSource);
     scope (exit) fixedModel.close();
     auto fixedCsv = buildPath(root, "fixed.csv");
@@ -62,6 +70,21 @@ void main(string[] args)
     auto fixedChain = readSampleCsv(fixedCsv);
     assert(fixedChain.comments.canFind("model = fixed_draws_model"));
     assert(fixedChain.column("x") == [42, 42] && fixedChain.warmupCount == 0);
+    assert(fixedChain.variable("x").series() is fixedChain.column("x"));
+    auto v = fixedChain.variable("v");
+    auto m = fixedChain.variable("m");
+    assert(v.shape == [2, 3] && v.strides == [1, 2]);
+    assert(m.shape == [2, 2, 3] && m.strides == [1, 2, 4]);
+    foreach (j; 0 .. 3)
+    {
+        assert(v.series(j) == [101 + j, 101 + j]);
+        foreach (i; 0 .. 2)
+        {
+            auto expected = 10 * (i + 1) + j + 1;
+            assert(m.series(i, j) == [expected, expected]);
+            assert(m.series(i, j) is fixedChain.column("m." ~ (i + 1).to!string ~ "." ~ (j + 1).to!string));
+        }
+    }
     auto files = runSample(model.executable, input, root, o);
     assert(fit.chainCount == 2 && fit.seed == o.seed);
     foreach (i; 0 .. fit.chainCount)

@@ -14,7 +14,9 @@ A fresh directory per run and per-chain working directories isolate auxiliary ou
 
 Stan data is a named JSON object. Arrays use logical nested indexing, matrices enter by row, and real nonfinite values use quoted Stan spellings. Sampling CSV uses one-based labels and enumerates the first parameter index fastest. The reader validates expected thinned row counts from configuration, independently of adaptation comments, and preserves original comments. It allocates a flat table per chain per phase with offset `column * savedIterations + iteration`. Each column view keeps its buffer alive. High-level chains use zero-based D indexing in launch order.
 
-For a parameter with shape 2 by 3, the first two CSV columns are `m.1.1` and `m.2.1`. A future adapter viewing this variable with axes [iteration, row, column] needs strides [1, n, 2*n] for n iterations. A future Mir subpackage can construct a strided view after validating the header. The core exposes the raw values today. Reading a CSV alone cannot recover the declared shape of a variable which emitted no columns.
+For a parameter with shape 2 by 3, the first two CSV columns are `m.1.1` and `m.2.1`. The core `DrawView` exposes axes [iteration, row, column] and element strides [1, n, 2*n] for n saved iterations. Sampling and warmup views use their own phase lengths. A lookup scans the header and validates the requested block's rank, contiguity, indices and ordering. The resulting view holds small shape and stride arrays and a read-only slice of the original draw buffer. Coordinate access requires no further header lookup.
+
+The header establishes indexed extents for dense numeric outputs of rank zero through two. A vector, row vector and one-dimensional array can have identical CSV labels. Variables that emitted no columns have no recoverable shape. Other output encodings remain accessible by exact column label. An optional Mir adapter can use this layout in a later milestone.
 
 ## Upstream evidence
 
