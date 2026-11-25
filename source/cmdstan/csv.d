@@ -3,7 +3,7 @@ module cmdstan.csv;
 
 import std.algorithm : splitter, startsWith, endsWith;
 import std.array : split;
-import std.conv : parse, to;
+import std.conv : to;
 import std.exception : basicExceptionCtors, enforce;
 import std.stdio : File;
 import std.string : indexOf, strip;
@@ -120,6 +120,9 @@ unittest
 
 private ChainDraws readChain(File input, string path, ulong bytes)
 {
+    auto locale = numericLocale();
+    enforce!CsvException(locale !is null, "Could not create C numeric locale");
+    scope (exit) freeLocale(locale);
     ChainDraws chain;
     size_t lineNumber, row;
     string[string] settings;
@@ -204,7 +207,7 @@ private ChainDraws readChain(File input, string path, ulong bytes)
             double value;
             try
             {
-                value = parseCell(token);
+                value = parseCell(token, locale);
             }
             catch (Exception)
             {
@@ -220,9 +223,8 @@ private ChainDraws readChain(File input, string path, ulong bytes)
     return chain;
 }
 
-// Phobos also accepts D numeric literals (hex, separators and suffixes).
-// Validate the decimal grammar before converting the original slice.
-private double parseCell(const(char)[] token)
+// Restrict conversion to the decimal grammar used by CmdStan CSV.
+private double parseCell(const(char)[] token, NumericLocale locale)
 {
     import std.ascii : isDigit;
     import std.string : icmp;
@@ -252,7 +254,34 @@ private double parseCell(const(char)[] token)
         enforce!CsvException(digits(), "Missing exponent");
     }
     enforce!CsvException(i == token.length, "Unexpected character in number");
-    auto result = parse!double(token);
-    enforce!CsvException(!token.length, "Trailing numeric input");
-    return result;
+    // The C runtime converts directly to binary64, including halfway cases.
+    // Keep ordinary fields on the stack and terminate them before the C call.
+    char[64] scratch = void;
+    char[] buffer = token.length < scratch.length ? scratch[] : new char[token.length + 1];
+    buffer[0 .. token.length] = token;
+    buffer[token.length] = 0;
+    return parseDecimal(buffer.ptr, null, locale);
+}
+
+version (Windows)
+{
+    private alias NumericLocale = void*;
+    private extern(C) NumericLocale _create_locale(int category, const(char)* name);
+    private extern(C) void _free_locale(NumericLocale);
+    private extern(C) double _strtod_l(const(char)*, char**, NumericLocale);
+    private alias freeLocale = _free_locale;
+    private alias parseDecimal = _strtod_l;
+    private NumericLocale numericLocale()
+    {
+        import core.stdc.locale : LC_NUMERIC;
+        return _create_locale(LC_NUMERIC, "C");
+    }
+}
+else version (Posix)
+{
+    private import core.sys.posix.locale : NumericLocale = locale_t, newlocale,
+        freeLocale = freelocale, LC_NUMERIC_MASK;
+    private extern(C) double strtod_l(const(char)*, char**, NumericLocale);
+    private alias parseDecimal = strtod_l;
+    private NumericLocale numericLocale() { return newlocale(LC_NUMERIC_MASK, "C", null); }
 }
