@@ -14,6 +14,40 @@ class CsvException : Exception
     mixin basicExceptionCtors;
 }
 
+/// A read-only view of one dense variable in one chain and sampling phase.
+struct DrawView
+{
+    private const(size_t)[] extents, steps;
+    private const(double)[] buffer;
+
+    /// Returns: Axis lengths in order [iteration], [iteration, element], or [iteration, row, column].
+    @property const(size_t)[] shape() const @safe pure nothrow { return extents; }
+    /// Returns: Distance in doubles between consecutive elements on each axis.
+    @property const(size_t)[] strides() const @safe pure nothrow { return steps; }
+    /// Returns: Flat variable storage in CSV column order, with iterations contiguous.
+    @property const(double)[] data() const @safe pure nothrow { return buffer; }
+
+    /++ Params:
+            coordinates = Zero-based variable indices, excluding the iteration axis.
+                Pass no indices for a scalar.
+        Returns: All saved iterations at the given coordinate, sharing the chain buffer.
+            The slice is empty for a phase with zero saved iterations.
+        Throws: CsvException for the wrong number of indices or an out-of-bounds coordinate.
+    +/
+    const(double)[] series(const(size_t)[] coordinates...) const @safe
+    {
+        enforce!CsvException(extents.length && coordinates.length == extents.length - 1,
+                             "Wrong number of variable indices");
+        size_t offset;
+        foreach (i, coordinate; coordinates)
+        {
+            enforce!CsvException(coordinate < extents[i + 1], "Variable index out of bounds");
+            offset += coordinate * steps[i + 1];
+        }
+        return buffer[offset .. offset + extents[0]];
+    }
+}
+
 /// Owned draws for one chain. Phase buffers store each column contiguously.
 struct ChainDraws
 {
@@ -55,12 +89,139 @@ struct ChainDraws
         return values(name, warmup, savedWarmup);
     }
 
+    /++ Params:
+            name = Base CSV variable name without indices.
+        Returns: A sampling view sharing the chain's numeric storage. Shape and
+            element strides include the iteration axis first. The header must
+            describe a scalar or a contiguous dense block of rank one or two.
+        Throws: CsvException for an unknown variable or unsupported layout.
+    +/
+    DrawView variable(string name) const @safe
+    {
+        return view(name, posterior, savedSamples);
+    }
+
+    ///
+    unittest
+    {
+        auto chain = readSampleCsv("tests/fixtures/matrix.csv");
+        auto m = chain.variable("m");
+        assert(m.shape == [2, 2, 3] && m.strides == [1, 2, 4]);
+        assert(m.series(1, 2) is chain.column("m.2.3"));
+    }
+
+    /++ Params:
+            name = Base CSV variable name without indices.
+        Returns: A shared read-only view with the same variable axes as variable().
+            Its first extent is zero when warmup was discarded.
+        Throws: CsvException for an unknown variable or unsupported layout.
+    +/
+    DrawView warmupVariable(string name) const @safe
+    {
+        return view(name, warmup, savedWarmup);
+    }
+
+    unittest
+    {
+        import std.exception : assertThrown;
+        auto chain = readSampleCsv("tests/fixtures/matrix.csv");
+        auto m = chain.variable("m");
+        auto warm = chain.warmupVariable("m");
+        assert(warm.shape == [1, 2, 3] && warm.strides == [1, 1, 2]);
+        foreach (col; 0 .. 3)
+            foreach (row; 0 .. 2)
+            {
+                auto label = "m." ~ (row + 1).to!string ~ "." ~ (col + 1).to!string;
+                auto value = 10 * (row + 1) + col + 1;
+                assert(m.series(row, col) is chain.column(label));
+                assert(warm.series(row, col) is chain.warmupColumn(label));
+                assert(m.series(row, col) == [value, value + 100]);
+                assert(warm.series(row, col) == [-value]);
+                assert(m.data[1 + row * m.strides[1] + col * m.strides[2]] == value + 100);
+            }
+        auto lp = chain.variable("lp__");
+        assert(lp.shape == [2] && lp.strides == [1] && lp.series() is chain.column("lp__"));
+        assertThrown!CsvException(m.series(0));
+        assertThrown!CsvException(m.series(2, 0));
+        assertThrown!CsvException(m.series(0, 3));
+        assertThrown!CsvException(chain.variable("missing"));
+        assertThrown!CsvException(chain.variable("m.1"));
+    }
+
+    private DrawView view(string name, const(double)[] buffer, size_t count) const @safe
+    {
+        enforce!CsvException(name.length && name.indexOf('.') < 0 && name.indexOf(':') < 0,
+                             "Expected a base variable name: " ~ name);
+        auto prefix = name ~ ".";
+        size_t first = names.length, width;
+        foreach (i, label; names)
+        {
+            if (label != name && !label.startsWith(prefix)) continue;
+            if (!width) first = i;
+            enforce!CsvException(i == first + width, "Noncontiguous columns for " ~ name);
+            ++width;
+        }
+        enforce!CsvException(width, "Unknown CSV variable " ~ name);
+
+        // In canonical order the last label contains the extents. Check the
+        // observed width before using those extents in any stride arithmetic.
+        size_t[2] dims;
+        auto rank = readIndices(names[first + width - 1][name.length .. $], dims);
+        bool dense;
+        final switch (rank) // readIndices accepts at most two indices.
+        {
+            case 0: dense = width == 1; break;
+            case 1: dense = width == dims[0]; break;
+            case 2: dense = width % dims[0] == 0 && width / dims[0] == dims[1]; break;
+        }
+        enforce!CsvException(dense, "Incomplete variable layout for " ~ name);
+        foreach (i, label; names[first .. first + width])
+        {
+            size_t[2] coord;
+            enforce!CsvException(readIndices(label[name.length .. $], coord) == rank &&
+                (rank == 0 || coord[0] == 1 + i % dims[0]) &&
+                (rank < 2 || coord[1] == 1 + i / dims[0]), "Unexpected CSV column " ~ label);
+        }
+        auto shape = new size_t[rank + 1];
+        auto strides = new size_t[rank + 1];
+        shape[0] = count;
+        strides[0] = 1;
+        foreach (i; 0 .. rank)
+        {
+            shape[i + 1] = dims[i];
+            strides[i + 1] = strides[i] * shape[i];
+        }
+        return DrawView(shape, strides, buffer[first * count .. (first + width) * count]);
+    }
+
     private const(double)[] values(string name, const(double)[] buffer, size_t count) const @safe
     {
         auto index = name in indices;
         enforce!CsvException(index !is null, "Unknown CmdStan column " ~ name);
         return buffer[*index * count .. (*index + 1) * count];
     }
+}
+
+// Decode the suffix only. Raw column lookup remains available for all headers.
+private size_t readIndices(string suffix, out size_t[2] coordinates) @safe
+{
+    import std.ascii : isDigit;
+    size_t rank;
+    while (suffix.length)
+    {
+        enforce!CsvException(rank < 2 && suffix[0] == '.' && suffix.length > 1 &&
+                             suffix[1] >= '1' && suffix[1] <= '9', "Unsupported CSV indices: " ~ suffix);
+        size_t value, i = 1;
+        while (i < suffix.length && isDigit(suffix[i]))
+        {
+            size_t digit = suffix[i++] - '0';
+            enforce!CsvException(value <= (size_t.max - digit) / 10, "CSV index too large");
+            value = value * 10 + digit;
+        }
+        coordinates[rank++] = value;
+        suffix = suffix[i .. $];
+    }
+    return rank;
 }
 
 /++ Params:
@@ -112,6 +273,25 @@ unittest
     assert(c.column("hi")[0] == double.infinity && c.column("lo")[0] == -double.infinity);
     assert(isNaN(c.column("n")[0]));
     assert(c.column("theta")[0] == 1 + double.epsilon && !c.warmupCount);
+    auto vectorChain = fixture(config ~ "v.1,v.2,vv.1\n7,8,9");
+    auto vector = vectorChain.variable("v");
+    assert(vector.shape == [1, 2] && vector.strides == [1, 1]);
+    assert(vector.series(1) is vectorChain.column("v.2"));
+    assert(vectorChain.variable("vv").shape == [1, 1]);
+    auto empty = vectorChain.warmupVariable("v");
+    assert(empty.shape == [0, 2] && empty.strides == [1, 0]);
+    assert(empty.data.length == 0 && empty.series(1).length == 0);
+    assertThrown!CsvException(empty.series(2));
+    foreach (labels; ["v.2,v.1", "v.1,v.3", "v,v.2", "v.1,v.2.1",
+                      "v.1,x,v.2", "v.1.1,v.1.2,v.2.1,v.2.2", "v.1.1.1",
+                      "v.0", "v.01", "v.real", "v.18446744073709551616"])
+    {
+        import std.array : replicate;
+        auto fields = labels.split(",");
+        auto raw = fixture(config ~ labels ~ "\n1" ~ ",1".replicate(fields.length - 1));
+        assert(raw.column(fields[0])[0] == 1);
+        assertThrown!CsvException(raw.variable("v"));
+    }
     auto fixed = fixture("# method = sample\n# algorithm = fixed_param\n# num_samples = 3\n" ~
                          "# num_warmup = 100\n# save_warmup = true\n# thin = 2\nx\n4\n8\n");
     assert(fixed.column("x") == [4, 8] && !fixed.warmupColumn("x").length);

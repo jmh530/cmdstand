@@ -9,6 +9,7 @@ dub.selections.json
 __test__*
 /cmdstand-test-*
 /examples/bernoulli/bernoulli-demo
+/examples/draws/draw-traces
 /tests/integration/integration
 /tests/process/process-check
 /cmdstand
