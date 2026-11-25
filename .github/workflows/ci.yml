@@ -1,0 +1,60 @@
+name: CmdStanD
+on: [push, pull_request, workflow_dispatch]
+
+jobs:
+  core:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        compiler: [dmd-2.114.0, ldc-1.43.0]
+        exclude:
+          - os: macos-latest
+            compiler: dmd-2.114.0
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ${{ matrix.compiler }}
+      - run: dub test
+      - run: dub run --root=tests/process
+      - run: dub build --root=examples/bernoulli
+
+  integration:
+    strategy:
+      fail-fast: false
+      matrix:
+        os: [ubuntu-latest, macos-latest, windows-latest]
+        stan: ['2.39.0', '2.40.0']
+    runs-on: ${{ matrix.os }}
+    steps:
+      - uses: actions/checkout@v4
+      - uses: dlang-community/setup-dlang@v2
+        with:
+          compiler: ldc-1.43.0
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - if: runner.os == 'Windows'
+        id: msys
+        uses: msys2/setup-msys2@v2
+        with:
+          msystem: UCRT64
+          install: mingw-w64-ucrt-x86_64-gcc mingw-w64-ucrt-x86_64-make
+      - if: runner.os == 'Windows'
+        shell: pwsh
+        env:
+          MSYS_ROOT: ${{ steps.msys.outputs.msys2-location }}
+        run: |
+          "$env:MSYS_ROOT\ucrt64\bin" >> $env:GITHUB_PATH
+          "$env:MSYS_ROOT\usr\bin" >> $env:GITHUB_PATH
+      - uses: actions/cache@v4
+        with:
+          path: ${{ runner.temp }}/cmdstan-archives
+          key: cmdstan-release-${{ matrix.stan }}-${{ hashFiles('tests/integration/setup_cmdstan.py') }}
+          enableCrossOsArchive: true
+      - run: python tests/integration/setup_cmdstan.py ${{ matrix.stan }}
+      - run: dub run --root=tests/integration -- "${{ env.CMDSTAN }}/examples/bernoulli/bernoulli.stan" "${{ runner.temp }}/comparison"
+      - run: python -m pip install cmdstanpy==1.3.2
+      - run: python tests/cross_interface/check.py "${{ runner.temp }}/comparison"
