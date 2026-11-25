@@ -1,0 +1,10 @@
+{
+    "name": "cmdstand",
+    "description": "A D interface to CmdStan executables and sampling output",
+    "license": "BSD-3-Clause",
+    "targetType": "library",
+    "configurations": [
+        {"name": "library"},
+        {"name": "unittest", "targetType": "executable", "mainSourceFile": "tests/main.d"}
+    ]
+}
