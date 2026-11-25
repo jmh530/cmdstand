@@ -14,7 +14,7 @@ auto warmup = chain.warmupColumn("theta");
 
 Columns use the exact labels in the CSV, including one-based Stan indices such as `beta.1`. Both accessors return views into owned D storage. The input file can be closed or removed after reading.
 
-For a dense scalar, vector, or matrix, use the base variable name. The first axis is saved iteration. Variable coordinates use zero-based D indices.
+For a dense variable, use the base variable name. The first axis is saved iteration, followed by one axis per numeric index in the CSV label. Variable coordinates use zero-based D indices.
 
 ```d
 auto m = chain.variable("m");          // For a 2-by-3 matrix with n draws:
@@ -57,7 +57,17 @@ CmdStan writes one saved draw per CSV row. Within that row it walks down each ma
 
 **To work with a whole draw, read across the table.** For draw 1, the matrix rows are `[2, 3]` and `[1, 4]`, giving determinant `2*4 - 3*1 = 5`. In CmdStanD's buffer, the first value of each coefficient trace belongs to that draw. For a numerical routine that accepts strides, the distances between adjacent rows and adjacent columns are `N` and `N*R` doubles, respectively, for `N` saved draws and `R` matrix rows. A routine that requires a packed row-major matrix needs the entries copied in row order. The example computes directly from the traces.
 
-**What can a CSV tell you about the Stan type?** The labels `x.1, x.2, x.3` tell you that each draw has three indexed values. A `vector[3]`, a `row_vector[3]`, and an `array[3] real` all produce those labels. Use the model declaration to choose row or column orientation for linear algebra. The current shaped view handles up to two variable indices; higher-dimensional outputs are accessible by exact column label. See the [CmdStan CSV format](https://mc-stan.org/docs/cmdstan-guide/stan_csv_apdx.html).
+**What about an array of matrices?** Suppose the model declares `array[2] matrix[3, 4] A`, one matrix per group. The axes of the view are saved draw, group, row, and column. To follow the bottom-right entry of the second group's matrix through the chain:
+
+```d
+auto a = chain.variable("A");
+auto n = chain.sampleCount;
+assert(a.shape == [n, 2, 3, 4]);
+assert(a.strides == [1, n, 2*n, 6*n]);
+assert(a.series(1, 2, 3) is chain.column("A.2.3.4"));
+```
+
+**What can a CSV tell you about the Stan type?** The labels give the indexed extents. The model declaration tells you what each axis means. For example, a `vector[3]`, a `row_vector[3]`, and an `array[3] real` all produce the labels `x.1, x.2, x.3`. Use the declaration to choose row or column orientation for linear algebra. See the [CmdStan CSV format](https://mc-stan.org/docs/cmdstan-guide/stan_csv_apdx.html).
 
 ## Compile and sample
 
