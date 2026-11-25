@@ -1,0 +1,7 @@
+{
+    "name": "draw-traces",
+    "dependencies": {"cmdstand": {"path": "../.."}},
+    "targetType": "executable",
+    "sourceFiles": ["app.d"],
+    "mainSourceFile": "app.d"
+}
