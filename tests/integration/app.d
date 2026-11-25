@@ -55,10 +55,14 @@ void main(string[] args)
         real x = 42;
         vector[3] v;
         matrix[2, 3] m;
+        array[2] matrix[3, 4] A;
         for (j in 1:3) {
             v[j] = 100 + j;
             for (i in 1:2) m[i, j] = 10 * i + j;
         }
+        for (g in 1:2)
+            for (r in 1:3)
+                for (c in 1:4) A[g, r, c] = 100 * g + 10 * r + c;
     }`);
     auto fixedModel = stan.compile(fixedSource);
     scope (exit) fixedModel.close();
@@ -85,6 +89,22 @@ void main(string[] args)
             assert(m.series(i, j) is fixedChain.column("m." ~ (i + 1).to!string ~ "." ~ (j + 1).to!string));
         }
     }
+    auto a = fixedChain.variable("A");
+    auto warmA = fixedChain.warmupVariable("A");
+    auto n = fixedChain.sampleCount;
+    assert(a.shape == [n, 2, 3, 4] && a.strides == [1, n, 2*n, 6*n]);
+    assert(warmA.shape == [0, 2, 3, 4] && warmA.strides == [1, 0, 0, 0]);
+    foreach (g; 0 .. 2)
+        foreach (r; 0 .. 3)
+            foreach (c; 0 .. 4)
+            {
+                auto label = "A." ~ (g + 1).to!string ~ "." ~ (r + 1).to!string ~ "." ~ (c + 1).to!string;
+                auto trace = a.series(g, r, c);
+                assert(trace is fixedChain.column(label));
+                auto expected = 100 * (g + 1) + 10 * (r + 1) + c + 1;
+                assert(trace == [expected, expected]);
+                assert(warmA.series(g, r, c).length == 0);
+            }
     auto files = runSample(model.executable, input, root, o);
     assert(fit.chainCount == 2 && fit.seed == o.seed);
     foreach (i; 0 .. fit.chainCount)

@@ -20,7 +20,7 @@ struct DrawView
     private const(size_t)[] extents, steps;
     private const(double)[] buffer;
 
-    /// Returns: Axis lengths in order [iteration], [iteration, element], or [iteration, row, column].
+    /// Returns: Saved iteration count followed by the extents in CSV index order.
     @property const(size_t)[] shape() const @safe pure nothrow { return extents; }
     /// Returns: Distance in doubles between consecutive elements on each axis.
     @property const(size_t)[] strides() const @safe pure nothrow { return steps; }
@@ -93,7 +93,7 @@ struct ChainDraws
             name = Base CSV variable name without indices.
         Returns: A sampling view sharing the chain's numeric storage. Shape and
             element strides include the iteration axis first. The header must
-            describe a scalar or a contiguous dense block of rank one or two.
+            describe a scalar or a contiguous dense block of one-based numeric indices.
         Throws: CsvException for an unknown variable or unsupported layout.
     +/
     DrawView variable(string name) const @safe
@@ -165,32 +165,33 @@ struct ChainDraws
 
         // In canonical order the last label contains the extents. Check the
         // observed width before using those extents in any stride arithmetic.
-        size_t[2] dims;
-        auto rank = readIndices(names[first + width - 1][name.length .. $], dims);
-        bool dense;
-        final switch (rank) // readIndices accepts at most two indices.
+        auto suffix = names[first + width - 1][name.length .. $];
+        size_t[] shape = [count];
+        size_t remaining = width;
+        while (suffix.length)
         {
-            case 0: dense = width == 1; break;
-            case 1: dense = width == dims[0]; break;
-            case 2: dense = width % dims[0] == 0 && width / dims[0] == dims[1]; break;
+            auto extent = readIndex(suffix);
+            enforce!CsvException(remaining % extent == 0, "Incomplete variable layout for " ~ name);
+            remaining /= extent;
+            shape ~= extent;
         }
-        enforce!CsvException(dense, "Incomplete variable layout for " ~ name);
+        enforce!CsvException(remaining == 1, "Incomplete variable layout for " ~ name);
         foreach (i, label; names[first .. first + width])
         {
-            size_t[2] coord;
-            enforce!CsvException(readIndices(label[name.length .. $], coord) == rank &&
-                (rank == 0 || coord[0] == 1 + i % dims[0]) &&
-                (rank < 2 || coord[1] == 1 + i / dims[0]), "Unexpected CSV column " ~ label);
+            suffix = label[name.length .. $];
+            size_t ordinal = i;
+            foreach (extent; shape[1 .. $])
+            {
+                enforce!CsvException(readIndex(suffix) == 1 + ordinal % extent,
+                                     "Unexpected CSV column " ~ label);
+                ordinal /= extent;
+            }
+            enforce!CsvException(!suffix.length, "Unexpected CSV column " ~ label);
         }
-        auto shape = new size_t[rank + 1];
-        auto strides = new size_t[rank + 1];
-        shape[0] = count;
+        auto strides = new size_t[shape.length];
         strides[0] = 1;
-        foreach (i; 0 .. rank)
-        {
-            shape[i + 1] = dims[i];
-            strides[i + 1] = strides[i] * shape[i];
-        }
+        foreach (i; 1 .. shape.length)
+            strides[i] = strides[i - 1] * shape[i - 1];
         return DrawView(shape, strides, buffer[first * count .. (first + width) * count]);
     }
 
@@ -202,26 +203,21 @@ struct ChainDraws
     }
 }
 
-// Decode the suffix only. Raw column lookup remains available for all headers.
-private size_t readIndices(string suffix, out size_t[2] coordinates) @safe
+// Consume one canonical, positive decimal index, including its leading dot.
+private size_t readIndex(ref string suffix) @safe
 {
     import std.ascii : isDigit;
-    size_t rank;
-    while (suffix.length)
+    enforce!CsvException(suffix.length >= 2 && suffix[0] == '.' &&
+                         suffix[1] >= '1' && suffix[1] <= '9', "Expected CSV index: " ~ suffix);
+    size_t value, i = 1;
+    while (i < suffix.length && isDigit(suffix[i]))
     {
-        enforce!CsvException(rank < 2 && suffix[0] == '.' && suffix.length > 1 &&
-                             suffix[1] >= '1' && suffix[1] <= '9', "Unsupported CSV indices: " ~ suffix);
-        size_t value, i = 1;
-        while (i < suffix.length && isDigit(suffix[i]))
-        {
-            size_t digit = suffix[i++] - '0';
-            enforce!CsvException(value <= (size_t.max - digit) / 10, "CSV index too large");
-            value = value * 10 + digit;
-        }
-        coordinates[rank++] = value;
-        suffix = suffix[i .. $];
+        size_t digit = suffix[i++] - '0';
+        enforce!CsvException(value <= (size_t.max - digit) / 10, "CSV index too large");
+        value = value * 10 + digit;
     }
-    return rank;
+    suffix = suffix[i .. $];
+    return value;
 }
 
 /++ Params:
@@ -282,8 +278,26 @@ unittest
     assert(empty.shape == [0, 2] && empty.strides == [1, 0]);
     assert(empty.data.length == 0 && empty.series(1).length == 0);
     assertThrown!CsvException(empty.series(2));
+    // Hand-authored rank-four output with singleton axes and distinct phases.
+    auto tensor = fixture(config.replace("num_warmup = 0", "num_warmup = 1")
+        .replace("save_warmup = 0", "save_warmup = 1") ~
+        "v.1.1.1.1,v.1.2.1.1,v.1.1.1.2,v.1.2.1.2\n-1,-2,-3,-4\n1,2,3,4");
+    auto draws = tensor.variable("v");
+    assert(draws.shape == [1, 1, 2, 1, 2] && draws.strides == [1, 1, 1, 2, 2]);
+    auto warmDraws = tensor.warmupVariable("v");
+    foreach (j; 0 .. 2)
+        foreach (k; 0 .. 2)
+        {
+            auto label = "v.1." ~ (j + 1).to!string ~ ".1." ~ (k + 1).to!string;
+            auto trace = draws.series(0, j, 0, k);
+            auto warmTrace = warmDraws.series(0, j, 0, k);
+            assert(trace is tensor.column(label) && warmTrace is tensor.warmupColumn(label));
+            assert(trace[0] == 1 + j + 2 * k && warmTrace[0] == -trace[0]);
+        }
+    assertThrown!CsvException(draws.series(0, 1, 1, 0));
     foreach (labels; ["v.2,v.1", "v.1,v.3", "v,v.2", "v.1,v.2.1",
-                      "v.1,x,v.2", "v.1.1,v.1.2,v.2.1,v.2.2", "v.1.1.1",
+                      "v.1,x,v.2", "v.1.1,v.1.2,v.2.1,v.2.2", "v.1.1.1,v.1.2",
+                      "v.1.1,v.1.1.2", "v.1.1.1,v.1.1.3", "v.4294967296.4294967296.1",
                       "v.0", "v.01", "v.real", "v.18446744073709551616"])
     {
         import std.array : replicate;
