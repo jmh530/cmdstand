@@ -2,7 +2,7 @@
 module cmdstan.sampling;
 
 import cmdstan.csv : ChainDraws, readSampleCsv;
-import cmdstan.internal.workspace : fullPath, newDirectory;
+import cmdstan.internal.workspace : fullPath, newDirectory, removeArtifactDirectory;
 import cmdstan.json : JsonFile, writeStanJson;
 import core.atomic : atomicLoad, atomicStore;
 import core.thread : Thread;
@@ -11,7 +11,7 @@ import std.conv : to;
 import std.exception : enforce, basicExceptionCtors;
 import std.file : exists, isFile, mkdir, rmdirRecurse;
 import std.path : buildPath;
-import std.process : Pid, ProcessException, spawnProcess, tryWait, wait, kill, Config;
+import std.process : Pid, ProcessException, spawnProcess, wait, kill, Config;
 import std.random : uniform;
 import std.stdio : File, stdin;
 
@@ -95,6 +95,17 @@ private string[] command(string exe, string data, string csv, SampleOptions o, u
     return args ~ ["output", "file=" ~ csv, "sig_figs=17", "refresh=0", "save_cmdstan_config=1"];
 }
 
+version (Windows)
+{
+    // Wait for the process handle to signal, even if an exit code is available earlier.
+    private auto pollChild(Pid child)
+    {
+        import std.process : waitTimeout;
+        return waitTimeout(child, 0.msecs);
+    }
+}
+else private import std.process : pollChild = tryWait;
+
 private SampleRun executeChains(string exe, string data, string directory, SampleOptions o)
 {
     SampleRun run;
@@ -131,7 +142,7 @@ private SampleRun executeChains(string exe, string data, string directory, Sampl
             foreach (i, ref child; children[0 .. next])
             {
                 if (child is null) continue;
-                auto status = tryWait(child);
+                auto status = pollChild(child);
                 if (!status.terminated) continue;
                 child = null;
                 --active;
@@ -160,7 +171,7 @@ private SampleRun executeChains(string exe, string data, string directory, Sampl
 
 package void finishChild(Pid child, ref ChainRun chain)
 {
-    auto status = tryWait(child);
+    auto status = pollChild(child);
     chain.exitCode = status.status;
     bool stopped;
     if (!status.terminated)
@@ -247,6 +258,6 @@ package SampleFit sampleData(T)(string exe, auto ref const T data, SampleOptions
     }
     fit.seed = run.seed;
     if (o.outputDir.length) fit.artifacts = run;
-    else rmdirRecurse(directory);
+    else removeArtifactDirectory(directory);
     return fit;
 }

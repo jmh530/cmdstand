@@ -34,6 +34,25 @@ int main(string[] args)
     environment["STAN_NUM_THREADS"] = "3";
     mkdir(root);
     scope (success) rmdirRecurse(root);
+    version (Windows)
+    {
+        import cmdstan.internal.workspace : removeArtifactDirectory;
+        import std.exception : assertThrown;
+        import std.stdio : File;
+        auto temporary = buildPath(root, "locked run");
+        mkdir(temporary);
+        auto log = buildPath(temporary, "stderr.log");
+        auto locked = File(log, "wb");
+        assertThrown!FileException(remove(log));
+        auto release = new Thread({
+            Thread.sleep(100.msecs);
+            locked.close();
+        });
+        release.start();
+        scope (exit) release.join();
+        removeArtifactDirectory(temporary);
+        assert(!exists(temporary));
+    }
     auto input = JsonFile(buildPath(root, "borrowed data.json"));
     SampleOptions o;
     o.chains = 3;

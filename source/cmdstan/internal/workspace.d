@@ -25,3 +25,26 @@ package(cmdstan) string newDirectory(string parent, string prefix)
     else mkdir(path);
     return path;
 }
+
+// Removing a run or model can race a short-lived Windows file lock.
+package(cmdstan) void removeArtifactDirectory(string path)
+{
+    import std.file : FileException, rmdirRecurse;
+    version (Windows)
+    {
+        import core.sys.windows.winerror : ERROR_ACCESS_DENIED, ERROR_SHARING_VIOLATION;
+        import core.thread : Thread;
+        import core.time : msecs;
+        for (int attempt = 0; ; ++attempt)
+        {
+            try { rmdirRecurse(path); return; }
+            catch (FileException e)
+            {
+                if (attempt == 7 || (e.errno != ERROR_SHARING_VIOLATION && e.errno != ERROR_ACCESS_DENIED))
+                    throw e;
+                Thread.sleep((10 << attempt).msecs);
+            }
+        }
+    }
+    else rmdirRecurse(path);
+}
