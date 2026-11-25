@@ -64,14 +64,16 @@ unittest
 /++ Params:
         T = Named data type accepted by the output-range overload.
         path = Destination file to create or replace after successful serialization.
+            POSIX replacement preserves the existing group and read/write/execute bits.
         data = Named data to serialize.
     Returns: Writes the JSON object to the specified file.
-    Throws: StanDataException for invalid data or a file exception on I/O failure.
+    Throws: StanDataException for invalid data or an I/O exception, including
+        failure to preserve the destination group.
 +/
 void writeStanJson(T)(string path, auto ref const T data)
 {
     import cmdstan.internal.workspace : fullPath, newDirectory;
-    import std.file : rename, rmdirRecurse;
+    import std.file : exists, rename, rmdirRecurse;
     import std.path : buildPath, dirName;
     auto destination = fullPath(path);
     auto staging = newDirectory(dirName(destination), ".cmdstand-json-");
@@ -83,6 +85,39 @@ void writeStanJson(T)(string path, auto ref const T data)
         writeStanJson(writer, data);
     }
     file.close();
+    version (Posix)
+    {
+        import core.stdc.errno : errno, ENOENT;
+        import core.sys.posix.sys.stat : stat, stat_t;
+        import core.sys.posix.sys.types : uid_t;
+        import core.sys.posix.unistd : chown;
+        import std.conv : octal;
+        import std.exception : errnoEnforce;
+        import std.file : setAttributes;
+        import std.string : toStringz;
+        stat_t original, staged;
+        if (stat(destination.toStringz, &original) == 0)
+        {
+            auto tmp = temporary.toStringz;
+            errnoEnforce(stat(tmp, &staged) == 0, temporary);
+            if (staged.st_gid != original.st_gid)
+                errnoEnforce(chown(tmp, cast(uid_t) -1, original.st_gid) == 0, destination);
+            setAttributes(temporary, original.st_mode & octal!777);
+        }
+        else errnoEnforce(errno == ENOENT, destination);
+    }
+    else version (Windows)
+    {
+        if (exists(destination))
+        {
+            import core.sys.windows.winbase : ReplaceFileW;
+            import std.utf : toUTF16z;
+            import std.windows.syserror : wenforce;
+            wenforce(ReplaceFileW(destination.toUTF16z, temporary.toUTF16z,
+                                  null, 0, null, null), destination);
+            return;
+        }
+    }
     rename(temporary, destination);
 }
 
@@ -96,10 +131,47 @@ unittest
     scope (exit) rmdirRecurse(directory);
     auto path = buildPath(directory, "input.json");
     writeStanJson(path, ["x": [1, 2]]);
+    version (Posix)
+    {
+        import std.conv : octal;
+        import core.sys.posix.sys.stat : stat, stat_t;
+        import core.sys.posix.sys.types : gid_t, uid_t;
+        import core.sys.posix.unistd : chown, getgroups;
+        import std.exception : errnoEnforce;
+        import std.file : setAttributes;
+        import std.string : toStringz;
+        auto name = path.toStringz;
+        stat_t original;
+        errnoEnforce(stat(name, &original) == 0);
+        auto expectedGroup = original.st_gid;
+        auto count = getgroups(0, null);
+        errnoEnforce(count >= 0);
+        auto groups = new gid_t[count];
+        if (count)
+        {
+            auto n = getgroups(count, groups.ptr);
+            errnoEnforce(n >= 0);
+            foreach (group; groups[0 .. n])
+                if (group != expectedGroup)
+                {
+                    errnoEnforce(chown(name, cast(uid_t) -1, group) == 0);
+                    expectedGroup = group;
+                    break;
+                }
+        }
+        setAttributes(path, octal!640);
+    }
     assertThrown!StanDataException(writeStanJson(path, ["x": [[1], [2, 3]]]));
     assert(readText(path) == `{"x":[1,2]}`);
     writeStanJson(path, ["x": [3]]);
     assert(readText(path) == `{"x":[3]}`);
+    version (Posix)
+    {
+        stat_t replacement;
+        errnoEnforce(stat(name, &replacement) == 0);
+        assert(replacement.st_gid == expectedGroup);
+        assert((replacement.st_mode & octal!777) == octal!640);
+    }
 }
 
 private void extent(ref size_t[] shape, size_t depth, size_t length, string path)
