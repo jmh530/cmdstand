@@ -1,15 +1,15 @@
-/// File-oriented sampling.
+/// File-oriented sampling and in-memory fits.
 module cmdstan.sampling;
 
-
+import cmdstan.csv : ChainDraws, readSampleCsv;
 import cmdstan.internal.workspace : fullPath, newDirectory;
-import cmdstan.json : JsonFile;
+import cmdstan.json : JsonFile, writeStanJson;
 import core.atomic : atomicLoad, atomicStore;
 import core.thread : Thread;
 import core.time : msecs;
 import std.conv : to;
 import std.exception : enforce, basicExceptionCtors;
-import std.file : exists, isFile, mkdir;
+import std.file : exists, isFile, mkdir, rmdirRecurse;
 import std.path : buildPath;
 import std.process : Pid, spawnProcess, tryWait, wait, kill, Config;
 import std.random : uniform;
@@ -171,4 +171,57 @@ package string tail(string path)
     auto n = min(f.size, 4096);
     f.seek(cast(long)(f.size - n));
     return cast(string) f.rawRead(new ubyte[cast(size_t)n]);
+}
+
+struct SampleFit
+{
+    private ChainDraws[] draws;
+    uint seed;
+    /// Retained run metadata. Empty directory means temporary files were removed.
+    SampleRun artifacts;
+
+    /// Returns: Number of validated chains.
+    @property size_t chainCount() const @safe pure nothrow { return draws.length; }
+
+    /++ Params:
+            index = Zero-based index in requested chain order.
+        Returns: Owned chain descriptor sharing the fit's numerical storage.
+        Throws: RangeError if index is out of bounds.
+    +/
+    const(ChainDraws) chain(size_t index) const @safe { return draws[index]; }
+}
+
+package SampleFit sampleData(T)(string exe, auto ref const T data, SampleOptions o)
+{
+    auto directory = newDirectory(o.outputDir, "run-");
+    JsonFile input;
+    try
+    {
+        static if (is(T == JsonFile)) input = JsonFile(fullPath(data.path));
+        else
+        {
+            input = JsonFile(buildPath(directory, "data.json"));
+            writeStanJson(input.path, data);
+        }
+        validate(exe, input, o);
+    }
+    catch (Exception e) { rmdirRecurse(directory); throw e; }
+
+    auto run = executeChains(exe, input.path, directory, o);
+    SampleFit fit;
+    foreach (ref c; run.chains)
+    {
+        auto draws = readSampleCsv(c.csv);
+        enforce!SamplingException(draws.chainId == c.id &&
+            draws.sampleCount == 1 + (o.samples - 1) / o.thin &&
+            draws.warmupCount == (o.saveWarmup && o.warmup ? 1 + (o.warmup - 1) / o.thin : 0),
+            "Unexpected chain ID or draw counts in " ~ c.csv);
+        enforce!SamplingException(!fit.draws.length || fit.draws[0].columnNames == draws.columnNames,
+                                  "Inconsistent column schema in " ~ c.csv);
+        fit.draws ~= draws;
+    }
+    fit.seed = run.seed;
+    if (o.outputDir.length) fit.artifacts = run;
+    else rmdirRecurse(directory);
+    return fit;
 }
