@@ -2,9 +2,9 @@
 module cmdstan.model;
 
 import cmdstan.json : JsonFile;
+import cmdstan.internal.workspace : removeArtifactDirectory;
 import cmdstan.sampling : SampleFit, SampleOptions, sampleData;
 import std.exception : enforce;
-import std.file : rmdirRecurse;
 
 final class CompiledModel
 {
@@ -39,7 +39,7 @@ final class CompiledModel
     {
         if (directory.length)
         {
-            rmdirRecurse(directory);
+            removeArtifactDirectory(directory);
             directory = null;
         }
     }

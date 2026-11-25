@@ -1,4 +1,5 @@
 import cmdstan;
+import std.algorithm : canFind;
 import std.conv : to;
 import std.exception : enforce;
 import std.file;
@@ -46,6 +47,21 @@ void main(string[] args)
     assert(!transient.artifacts.directory.length);
     o.outputDir = args.length == 3 ? absolutePath(args[2]) : root;
     auto fit = model.sample(input, o);
+    auto stem = stripExtension(baseName(model.executable));
+    assert(fit.chain(0).comments.canFind("model = " ~ stem ~ "_model"));
+    assert(stem != "fixed_draws");
+    auto fixedSource = buildPath(root, "fixed_draws.stan");
+    std.file.write(fixedSource, "generated quantities { real x = 42; }");
+    auto fixedModel = stan.compile(fixedSource);
+    scope (exit) fixedModel.close();
+    auto fixedCsv = buildPath(root, "fixed.csv");
+    auto fixedRun = execute([fixedModel.executable, "sample", "algorithm=fixed_param",
+        "num_warmup=100", "save_warmup=1", "num_samples=3", "thin=2",
+        "output", "file=" ~ fixedCsv], null, Config.none, size_t.max, root);
+    enforce(fixedRun.status == 0, fixedRun.output);
+    auto fixedChain = readSampleCsv(fixedCsv);
+    assert(fixedChain.comments.canFind("model = fixed_draws_model"));
+    assert(fixedChain.column("x") == [42, 42] && fixedChain.warmupCount == 0);
     auto files = runSample(model.executable, input, root, o);
     assert(fit.chainCount == 2 && fit.seed == o.seed);
     foreach (i; 0 .. fit.chainCount)

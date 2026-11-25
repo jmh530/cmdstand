@@ -113,12 +113,13 @@ struct CmdStan
             if ("included_files" in info.object)
                 enforce!CompilationException(info["included_files"].array.length == 0,
                                               "Compilation of Stan includes is not yet supported");
-            auto staged = buildPath(directory, "model.stan");
+            auto stem = modelStem(baseName(source)[0 .. $ - ".stan".length]);
+            auto staged = buildPath(directory, stem ~ ".stan");
             copy(source, staged);
             version (Windows) string make = "mingw32-make";
             else string make = "make";
             if (options.make.length) make = options.make;
-            auto target = buildPath(directory, "model" ~ suffix);
+            auto target = buildPath(directory, stem ~ suffix);
             // Upstream Make may update shared installation objects even for a fresh target.
             synchronized
             {
@@ -199,4 +200,26 @@ struct CmdStan
         environment["CMDSTAN"] = buildPath(parent, "missing");
         assertThrown!InstallationException(discover());
     }
+}
+
+private string modelStem(string name)
+{
+    import std.ascii : isAlpha, isAlphaNum;
+    import std.digest : toHexString;
+    import std.digest.sha : sha256Of;
+    bool valid = name.length && isAlpha(name[0]);
+    foreach (c; name) valid = valid && (isAlphaNum(c) || c == '_');
+    if (valid) return name;
+
+    // Keep non-identifier filenames recognizable and distinguish e.g. "a-b" and "a b".
+    string stem = "m_";
+    foreach (c; name[0 .. (name.length > 160 ? 160 : name.length)])
+        stem ~= isAlphaNum(c) ? c : '_';
+    return stem ~ "_" ~ name.sha256Of.toHexString[0 .. 12].idup;
+}
+
+unittest
+{
+    assert(modelStem("bernoulli") == "bernoulli");
+    assert(modelStem("a b") != modelStem("a-b"));
 }

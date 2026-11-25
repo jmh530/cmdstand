@@ -2,7 +2,7 @@
 module cmdstan.sampling;
 
 import cmdstan.csv : ChainDraws, readSampleCsv;
-import cmdstan.internal.workspace : fullPath, newDirectory;
+import cmdstan.internal.workspace : fullPath, newDirectory, removeArtifactDirectory;
 import cmdstan.json : JsonFile, writeStanJson;
 import core.atomic : atomicLoad, atomicStore;
 import core.thread : Thread;
@@ -11,7 +11,7 @@ import std.conv : to;
 import std.exception : enforce, basicExceptionCtors;
 import std.file : exists, isFile, mkdir, rmdirRecurse;
 import std.path : buildPath;
-import std.process : Pid, spawnProcess, tryWait, wait, kill, Config;
+import std.process : Pid, ProcessException, spawnProcess, wait, kill, Config;
 import std.random : uniform;
 import std.stdio : File, stdin;
 
@@ -95,6 +95,17 @@ private string[] command(string exe, string data, string csv, SampleOptions o, u
     return args ~ ["output", "file=" ~ csv, "sig_figs=17", "refresh=0", "save_cmdstan_config=1"];
 }
 
+version (Windows)
+{
+    // Wait for the process handle to signal, even if an exit code is available earlier.
+    private auto pollChild(Pid child)
+    {
+        import std.process : waitTimeout;
+        return waitTimeout(child, 0.msecs);
+    }
+}
+else private import std.process : pollChild = tryWait;
+
 private SampleRun executeChains(string exe, string data, string directory, SampleOptions o)
 {
     SampleRun run;
@@ -131,7 +142,7 @@ private SampleRun executeChains(string exe, string data, string directory, Sampl
             foreach (i, ref child; children[0 .. next])
             {
                 if (child is null) continue;
-                auto status = tryWait(child);
+                auto status = pollChild(child);
                 if (!status.terminated) continue;
                 child = null;
                 --active;
@@ -149,19 +160,44 @@ private SampleRun executeChains(string exe, string data, string directory, Sampl
         foreach (i, child; children)
         {
             if (child is null) continue;
-            // Direct model children only. A hard stop avoids hanging cleanup on a handler.
-            try {
-                version (Posix) { import core.sys.posix.signal : SIGKILL; kill(child, SIGKILL); }
-                else kill(child);
-            } catch (Exception) { /* May already have exited. Reap it below. */ }
-            run.chains[i].exitCode = wait(child);
-            run.chains[i].state = ChainState.cancelled;
+            finishChild(child, run.chains[i]);
         }
         auto error = new SamplingException(failure.msg ~ "\nRun directory: " ~ directory);
         error.chains = run.chains;
         throw error;
     }
     return run;
+}
+
+package void finishChild(Pid child, ref ChainRun chain)
+{
+    auto status = pollChild(child);
+    chain.exitCode = status.status;
+    bool stopped;
+    if (!status.terminated)
+    {
+        version (Windows)
+        {
+            enum stopCode = 0x434D44;
+            enum stoppedStatus = stopCode;
+        }
+        else
+        {
+            import core.sys.posix.signal : SIGKILL;
+            enum stopCode = SIGKILL;
+            enum stoppedStatus = -SIGKILL;
+        }
+        try
+        {
+            kill(child, stopCode);
+            stopped = true;
+        }
+        catch (ProcessException) { /* The child may have exited since the poll. */ }
+        chain.exitCode = wait(child);
+        stopped = stopped && chain.exitCode == stoppedStatus;
+    }
+    if (stopped) chain.state = ChainState.cancelled;
+    else chain.state = chain.exitCode ? ChainState.failed : ChainState.succeeded;
 }
 
 package string tail(string path)
@@ -222,6 +258,6 @@ package SampleFit sampleData(T)(string exe, auto ref const T data, SampleOptions
     }
     fit.seed = run.seed;
     if (o.outputDir.length) fit.artifacts = run;
-    else rmdirRecurse(directory);
+    else removeArtifactDirectory(directory);
     return fit;
 }

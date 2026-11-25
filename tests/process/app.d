@@ -1,5 +1,5 @@
 /// This executable serves as both test driver and stand-in CmdStan child.
-module process_check;
+module cmdstan.process_check;
 
 import cmdstan;
 import core.thread : Thread;
@@ -10,17 +10,49 @@ import std.conv : to;
 import std.exception : enforce;
 import std.file;
 import std.path;
-import std.process : environment;
+import std.process : environment, spawnProcess, wait;
 import std.stdio : stdout, stderr;
 import std.uuid : randomUUID;
 
 int main(string[] args)
 {
     if (args.length > 1 && args[1] == "sample") return fakeChild(args);
+    if (args.length == 3 && args[1] == "exit") return args[2].to!int;
+    // Deterministically exercise cleanup after siblings have already exited.
+    import cmdstan.sampling : finishChild;
+    foreach (code; [0, 17])
+    {
+        auto sibling = spawnProcess([thisExePath(), "exit", code.to!string]);
+        auto actual = wait(sibling);
+        assert(actual == code);
+        ChainRun report;
+        finishChild(sibling, report);
+        assert(report.exitCode == code);
+        assert(report.state == (code ? ChainState.failed : ChainState.succeeded));
+    }
     auto root = buildPath(tempDir(), "cmdstand process " ~ randomUUID.toString);
     environment["STAN_NUM_THREADS"] = "3";
     mkdir(root);
     scope (success) rmdirRecurse(root);
+    version (Windows)
+    {
+        import cmdstan.internal.workspace : removeArtifactDirectory;
+        import std.exception : assertThrown;
+        import std.stdio : File;
+        auto temporary = buildPath(root, "locked run");
+        mkdir(temporary);
+        auto log = buildPath(temporary, "stderr.log");
+        auto locked = File(log, "wb");
+        assertThrown!FileException(remove(log));
+        auto release = new Thread({
+            Thread.sleep(100.msecs);
+            locked.close();
+        });
+        release.start();
+        scope (exit) release.join();
+        removeArtifactDirectory(temporary);
+        assert(!exists(temporary));
+    }
     auto input = JsonFile(buildPath(root, "borrowed data.json"));
     SampleOptions o;
     o.chains = 3;
@@ -71,7 +103,10 @@ private int fakeChild(string[] args)
         if (arg == "output") output = args[i + 1]["file=".length .. $];
         if (arg.startsWith("id=")) id = arg[3 .. $];
     }
-    enforce(dirName(output) == getcwd() && baseName(getcwd()) == "chain-" ~ id);
+    enforce(baseName(getcwd()) == "chain-" ~ id);
+    // getcwd can resolve a symlink in the supplied output directory.
+    write("ready", "");
+    enforce(exists(buildPath(dirName(output), "ready")));
     enforce(environment["STAN_NUM_THREADS"] == "1");
     auto scenario = readText(input);
     if (scenario == "fail" && id == "1") return 17;
@@ -80,7 +115,6 @@ private int fakeChild(string[] args)
 
     // Both slots must start, and chain 3 must remain queued until one is free.
     auto run = dirName(getcwd());
-    write(buildPath(getcwd(), "ready"), "");
     if (id == "1" || id == "2")
     {
         auto other = id == "1" ? "chain-2" : "chain-1";
