@@ -1,0 +1,174 @@
+/// File-oriented sampling.
+module cmdstan.sampling;
+
+
+import cmdstan.internal.workspace : fullPath, newDirectory;
+import cmdstan.json : JsonFile;
+import core.atomic : atomicLoad, atomicStore;
+import core.thread : Thread;
+import core.time : msecs;
+import std.conv : to;
+import std.exception : enforce, basicExceptionCtors;
+import std.file : exists, isFile, mkdir;
+import std.path : buildPath;
+import std.process : Pid, spawnProcess, tryWait, wait, kill, Config;
+import std.random : uniform;
+import std.stdio : File, stdin;
+
+class SamplingException : Exception
+{
+    /// Requested chains in launch order, including those still queued on failure.
+    ChainRun[] chains;
+    mixin basicExceptionCtors;
+}
+
+/// Cooperative cancellation flag shared with the supervising thread.
+final class Cancellation
+{
+    private shared bool requested;
+    /// Returns: Marks this token cancelled for all current and future calls.
+    void cancel() @safe nothrow { requested.atomicStore(true); }
+    /// Returns: Whether cancellation has been requested.
+    @property bool cancelled() @safe nothrow { return requested.atomicLoad; }
+}
+
+struct SampleOptions
+{
+    uint chains = 1, parallelChains = 1;
+    uint warmup = 1_000, samples = 1_000, thin = 1;
+    uint seed; /// Zero selects one random positive seed for the run.
+    bool saveWarmup, zeroInit;
+    string outputDir; /// Optional parent for persistent high-level runs.
+    Cancellation cancellation;
+}
+
+enum ChainState { queued, running, succeeded, failed, cancelled }
+
+struct ChainRun
+{
+    uint id;
+    ChainState state;
+    int exitCode;
+    string csv, stdoutLog, stderrLog;
+    string[] argv;
+}
+
+struct SampleRun
+{
+    string directory;
+    uint seed;
+    ChainRun[] chains;
+}
+
+/++ Params:
+        executable = Existing compiled model.
+        data = Existing Stan JSON file, owned by the caller.
+        outputDir = Parent directory for a new retained run directory.
+        options = Sampling configuration. Chain IDs start at one.
+    Returns: Artifact paths and process metadata for all chains in ID order.
+    Throws: SamplingException for invalid options, cancellation, or child failure.
++/
+SampleRun runSample(string executable, JsonFile data, string outputDir, SampleOptions options = SampleOptions.init)
+{
+    enforce!SamplingException(outputDir.length, "A retained output directory is required");
+    validate(executable, data, options);
+    return executeChains(fullPath(executable), fullPath(data.path), newDirectory(outputDir, "run-"), options);
+}
+
+private void validate(string exe, JsonFile data, SampleOptions o)
+{
+    enforce!SamplingException(exists(exe) && isFile(exe), "Missing model executable " ~ exe);
+    enforce!SamplingException(exists(data.path) && isFile(data.path), "Missing JSON data " ~ data.path);
+    enforce!SamplingException(o.chains && o.parallelChains && o.samples && o.thin,
+                              "chains, parallelChains, samples and thin must be positive");
+    enforce!SamplingException(o.chains <= int.max && o.samples <= int.max &&
+                              o.warmup <= int.max && o.thin <= int.max, "Counts exceed CmdStan integer range");
+}
+
+private string[] command(string exe, string data, string csv, SampleOptions o, uint id, uint seed)
+{
+    auto args = [exe, "sample", "num_samples=" ~ o.samples.to!string,
+                 "num_warmup=" ~ o.warmup.to!string, "thin=" ~ o.thin.to!string,
+                 o.saveWarmup ? "save_warmup=1" : "save_warmup=0", "id=" ~ id.to!string,
+                 "random", "seed=" ~ seed.to!string, "data", "file=" ~ data];
+    if (o.zeroInit) args ~= "init=0";
+    return args ~ ["output", "file=" ~ csv, "sig_figs=17", "refresh=0", "save_cmdstan_config=1"];
+}
+
+private SampleRun executeChains(string exe, string data, string directory, SampleOptions o)
+{
+    SampleRun run;
+    run.directory = directory;
+    run.seed = o.seed ? o.seed : uniform!"[]"(1u, uint.max);
+    run.chains.length = o.chains;
+    foreach (i, ref c; run.chains) c.id = cast(uint)i + 1;
+    Pid[] children = new Pid[o.chains];
+    size_t next, active;
+    try
+    {
+        while (next < o.chains || active)
+        {
+            enforce!SamplingException(o.cancellation is null || !o.cancellation.cancelled, "Sampling cancelled");
+            while (next < o.chains && active < o.parallelChains)
+            {
+                auto c = &run.chains[next];
+                c.state = ChainState.failed; // Until spawn succeeds.
+                auto cwd = buildPath(directory, "chain-" ~ c.id.to!string);
+                mkdir(cwd);
+                c.csv = buildPath(cwd, "draws.csv");
+                c.stdoutLog = buildPath(cwd, "stdout.log");
+                c.stderrLog = buildPath(cwd, "stderr.log");
+                c.argv = command(exe, data, c.csv, o, c.id, run.seed);
+                auto outFile = File(c.stdoutLog, "wb");
+                auto errFile = File(c.stderrLog, "wb");
+                // This milestone schedules single-threaded chains; leave the parent environment alone.
+                children[next] = spawnProcess(c.argv, stdin, outFile, errFile,
+                                              ["STAN_NUM_THREADS": "1"], Config.none, cwd);
+                c.state = ChainState.running;
+                ++active;
+                ++next;
+            }
+            foreach (i, ref child; children[0 .. next])
+            {
+                if (child is null) continue;
+                auto status = tryWait(child);
+                if (!status.terminated) continue;
+                child = null;
+                --active;
+                auto c = &run.chains[i];
+                c.exitCode = status.status;
+                c.state = status.status ? ChainState.failed : ChainState.succeeded;
+                enforce!SamplingException(status.status == 0, "Chain " ~ c.id.to!string ~
+                    " exited with code " ~ status.status.to!string ~ "\n" ~ tail(c.stderrLog) ~ tail(c.stdoutLog));
+            }
+            if (active) Thread.sleep(10.msecs);
+        }
+    }
+    catch (Exception failure)
+    {
+        foreach (i, child; children)
+        {
+            if (child is null) continue;
+            // Direct model children only. A hard stop avoids hanging cleanup on a handler.
+            try {
+                version (Posix) { import core.sys.posix.signal : SIGKILL; kill(child, SIGKILL); }
+                else kill(child);
+            } catch (Exception) { /* May already have exited. Reap it below. */ }
+            run.chains[i].exitCode = wait(child);
+            run.chains[i].state = ChainState.cancelled;
+        }
+        auto error = new SamplingException(failure.msg ~ "\nRun directory: " ~ directory);
+        error.chains = run.chains;
+        throw error;
+    }
+    return run;
+}
+
+package string tail(string path)
+{
+    import std.algorithm : min;
+    auto f = File(path, "rb");
+    auto n = min(f.size, 4096);
+    f.seek(cast(long)(f.size - n));
+    return cast(string) f.rawRead(new ubyte[cast(size_t)n]);
+}
