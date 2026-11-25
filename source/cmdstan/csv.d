@@ -112,6 +112,9 @@ unittest
     assert(c.column("hi")[0] == double.infinity && c.column("lo")[0] == -double.infinity);
     assert(isNaN(c.column("n")[0]));
     assert(c.column("theta")[0] == 1 + double.epsilon && !c.warmupCount);
+    auto fixed = fixture("# method = sample\n# algorithm = fixed_param\n# num_samples = 3\n" ~
+                         "# num_warmup = 100\n# save_warmup = true\n# thin = 2\nx\n4\n8\n");
+    assert(fixed.column("x") == [4, 8] && !fixed.warmupColumn("x").length);
     foreach (bad; ["a,a\n1,2", "a,b\n1", "a\n1,2", "a\n", "a\n1oops",
                    "a\n1,", "a\n1\n2", "a\n0x1p0", "a\n1f", "a\n1_0"])
         assertThrown!CsvException(fixture(config ~ bad));
@@ -169,7 +172,8 @@ private ChainDraws readChain(File input, string path, ulong bytes)
             check(save == "0" || save == "1" || save == "false" || save == "true",
                   "invalid save_warmup");
             auto warm = number("num_warmup");
-            if (save == "1" || save == "true") chain.savedWarmup = thinned(warm);
+            if ((save == "1" || save == "true") && settings.get("algorithm", "") != "fixed_param")
+                chain.savedWarmup = thinned(warm);
             if ("id" in settings)
             {
                 auto id = number("id");
