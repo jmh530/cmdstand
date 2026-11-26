@@ -115,6 +115,19 @@ Run the example from `examples/bernoulli` with `dub run`. The model compiles onc
 
 For direct control, use `writeStanJson(path, data)` and `runSample(executable, JsonFile(path), outputParent, options)`. The latter retains per-chain CSV, configuration, stdout and stderr below a unique run directory. The convenience API accepts the same `JsonFile`, a struct, string-keyed associative array, or named `JSONValue` object. Set `options.outputDir` to retain its artifacts. Otherwise it removes successful run files after parsing. Exceptions identify failed build or run directories for inspection and removal. Cooperative cancellation uses a `Cancellation` object in the options.
 
+### Models with Stan includes
+
+If `models/survey.stan` contains `#include helpers/centered.stan`, put the helper at `models/helpers/centered.stan` and call `stan.compile("models/survey.stan")` as usual. For shared libraries, add directories in the order you want them searched:
+
+```d
+CompileOptions build;
+build.includePaths = ["shared Stan functions", "vendor/stan"];
+auto model = stan.compile("models/survey.stan", build);
+scope (exit) model.close();
+```
+
+The model's directory is searched first for every include, including nested ones. Relative entries in `includePaths` resolve from the calling program's working directory. Spaces are supported. An additional directory's absolute path must fit in stanc's comma-separated list, so it cannot contain a comma. For a model with includes, runtime line numbers refer to the expanded `.stan` file alongside `model.executable`.
+
 ## Development
 
 - `dub test` runs fixture, discovery, and data tests.

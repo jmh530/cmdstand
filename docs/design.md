@@ -6,7 +6,9 @@ The file contracts are the foundation. A CSV reader owns numeric buffers and kno
 
 An explicit installation snapshots the selected root and release. Compilation invokes its stanc and GNU Make, using a fresh staging directory. The target retains the source basename for ordinary identifiers. Other filenames use a Make-compatible identifier with a digest of the original name so the CSV records a distinguishable model name. The build directory holds the executable, its runtime companions, model info and compiler log. The model records its source and installation. Closing the handle removes the directory. Builds against one installation use a lock across wrapper processes sharing a temp directory. Calls to close must occur after active uses of that model have finished.
 
-The milestone supports standalone sources. Persistent caching needs the resolved transitive include graph, effective options, installation and compiler identity, platform, and build-local settings. An executable timestamp alone cannot capture these inputs. Explicit model-handle reuse avoids this ambiguity.
+CmdStanD runs `stanc --info` in the original model directory with an ordered include search path. When the metadata lists included files, it runs `stanc --auto-format --canonicalize=includes` with the same source, working directory and search path, and writes the expanded program into staging. Make translates that file using the installation's build settings. This lets stanc resolve nested includes and report missing files against the original sources. Runtime diagnostics refer to the staged program's line numbers. Single-file models are copied verbatim.
+
+Persistent caching needs the resolved transitive include graph, effective options, installation and compiler identity, platform, and build-local settings. An executable timestamp alone cannot capture these inputs. Explicit model-handle reuse avoids this ambiguity.
 
 ## Chain and file ownership
 
