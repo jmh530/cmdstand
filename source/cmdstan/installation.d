@@ -1,15 +1,15 @@
-/// Select an existing CmdStan installation and build standalone models.
+/// Select an existing CmdStan installation and build Stan models.
 module cmdstan.installation;
 
 import cmdstan.internal.workspace;
 import cmdstan.model : CompiledModel;
 import cmdstan.sampling : tail;
 import std.algorithm : canFind, startsWith, endsWith;
-import std.array : split;
+import std.array : join, split;
 import std.conv : to;
 import std.exception : basicExceptionCtors, enforce;
 import std.file;
-import std.path : baseName, buildPath, dirName, expandTilde, extension;
+import std.path : absolutePath, baseName, buildPath, dirName, expandTilde, extension;
 import std.process : Config, environment, spawnProcess, wait;
 import std.stdio : File, stdin;
 import std.string : splitLines, strip;
@@ -31,6 +31,9 @@ struct CompileOptions
     string stagingRoot;
     /// GNU Make executable path or command. Empty selects the platform default.
     string make;
+    /// Additional Stan include directories in search order, after the model's
+    /// directory. Relative paths start at the caller's working directory.
+    string[] includePaths;
 }
 
 struct CmdStan
@@ -79,16 +82,18 @@ struct CmdStan
     }
 
     /++ Params:
-            source = Existing standalone .stan file.
-            options = GNU Make and staging path overrides.
+            source = Existing .stan file. Its directory is searched first for includes.
+            options = Additional include directories, GNU Make and staging path overrides.
         Returns: A reusable compiled model. Call close when finished with it.
-        Throws: CompilationException if translation or the upstream build fails.
+        Throws: CompilationException for invalid include directories or if
+            translation or the upstream build fails. Additional directory paths
+            must be representable in stanc's comma-separated search list.
     +/
     CompiledModel compile(string source, CompileOptions options = CompileOptions.init) const
     {
         import std.digest.sha : sha256Of;
         import std.digest : toHexString;
-        import std.json : JSONType, parseJSON;
+        import std.json : parseJSON;
         source = fullPath(source);
         enforce!CompilationException(exists(source) && isFile(source) && extension(source) == ".stan",
                                      "Expected a Stan source file: " ~ source);
@@ -102,20 +107,33 @@ struct CmdStan
                         "GNU Make requires a compatible installation and staging path: " ~ p);
             auto stanc = buildPath(root, "bin", "stanc" ~ suffix);
             auto infoPath = buildPath(directory, "model-info.json");
+            string[] paths = ["."];
+            foreach (path; options.includePaths)
             {
-                auto info = File(infoPath, "wb");
-                auto err = File(log, "wb");
-                auto status = wait(spawnProcess([stanc, "--info", "--include-paths=.", source],
-                    stdin, info, err, null, Config.none, dirName(source)));
+                enforce!CompilationException(path.length, "Empty Stan include directory");
+                // Let the filesystem resolve .. after following directory symlinks.
+                auto resolved = absolutePath(path);
+                enforce!CompilationException(exists(resolved) && isDir(resolved) && !resolved.canFind(','),
+                    "Expected a Stan include directory with no comma in its path: " ~ resolved);
+                paths ~= resolved;
+            }
+            auto includeFlag = "--include-paths=" ~ paths.join(",");
+            void runStanc(string[] flags, string destination)
+            {
+                auto output = File(destination, "wb");
+                auto err = File(log, "ab");
+                auto status = wait(spawnProcess([stanc] ~ flags ~ [includeFlag, source],
+                    stdin, output, err, null, Config.none, dirName(source)));
                 enforce!CompilationException(status == 0, "stanc exited with code " ~ status.to!string);
             }
+            runStanc(["--info"], infoPath);
             auto info = parseJSON(readText(infoPath));
-            if ("included_files" in info.object)
-                enforce!CompilationException(info["included_files"].array.length == 0,
-                                              "Compilation of Stan includes is not yet supported");
             auto stem = modelStem(baseName(source)[0 .. $ - ".stan".length]);
             auto staged = buildPath(directory, stem ~ ".stan");
-            copy(source, staged);
+            if ("included_files" in info.object && info["included_files"].array.length)
+                runStanc(["--auto-format", "--canonicalize=includes"], staged);
+            else
+                copy(source, staged);
             version (Windows) string make = "mingw32-make";
             else string make = "make";
             if (options.make.length) make = options.make;

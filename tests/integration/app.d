@@ -26,6 +26,13 @@ void main(string[] args)
         assert(error.directory.length && exists(buildPath(error.directory, "build.log")));
         rmdirRecurse(error.directory);
     }
+    std.file.write(broken, "functions {\n#include missing-helper.stan\n}\n");
+    try { stan.compile(broken); assert(0, "missing include was accepted"); }
+    catch (CompilationException error)
+    {
+        assert(readText(buildPath(error.directory, "build.log")).canFind("missing-helper.stan"));
+        rmdirRecurse(error.directory);
+    }
     auto model = stan.compile(source);
     scope (exit) model.close();
 
@@ -50,8 +57,25 @@ void main(string[] args)
     auto stem = stripExtension(baseName(model.executable));
     assert(fit.chain(0).comments.canFind("model = " ~ stem ~ "_model"));
     assert(stem != "fixed_draws");
-    auto fixedSource = buildPath(root, "fixed_draws.stan");
-    std.file.write(fixedSource, `generated quantities {
+    auto models = buildPath(root, "model sources");
+    auto first = buildPath(root, "first library");
+    auto second = buildPath(root, "second library");
+    mkdirRecurse(buildPath(models, "helpers"));
+    mkdir(first);
+    mkdir(second);
+    std.file.write(buildPath(models, "helpers", "functions.stan"),
+        "#include midpoint.stan\n#include centered.stan\n");
+    std.file.write(buildPath(models, "midpoint.stan"), "real midpoint() { return 3; }\n");
+    std.file.write(buildPath(first, "midpoint.stan"), "real midpoint() { return 100; }\n");
+    std.file.write(buildPath(first, "centered.stan"),
+        "real centered(real x) { return x - midpoint(); }\n");
+    std.file.write(buildPath(second, "centered.stan"), "real centered(real x) { return 999; }\n");
+    auto fixedSource = buildPath(models, "fixed_draws.stan");
+    std.file.write(fixedSource, `functions {
+        #include helpers/functions.stan
+    }
+    generated quantities {
+        real included_value = centered(8);
         real x = 42;
         vector[3] v;
         matrix[2, 3] m;
@@ -64,7 +88,26 @@ void main(string[] args)
             for (r in 1:3)
                 for (c in 1:4) A[g, r, c] = 100 * g + 10 * r + c;
     }`);
-    auto fixedModel = stan.compile(fixedSource);
+    CompileOptions build;
+    // Relative include paths start at the caller, independently of the model directory.
+    build.includePaths = [baseName(first), baseName(second)];
+    version (Posix)
+    {
+        // link/.. reaches the first library. Lexically collapsing it would
+        // select the decoy in the caller's working directory instead.
+        auto child = buildPath(first, "child");
+        mkdir(child);
+        symlink(child, buildPath(root, "library link"));
+        std.file.write(buildPath(root, "centered.stan"), "real centered(real x) { return -1; }\n");
+        build.includePaths[0] = buildPath("library link", "..");
+    }
+    CompiledModel fixedModel;
+    {
+        auto previous = getcwd();
+        chdir(root);
+        scope (exit) chdir(previous);
+        fixedModel = stan.compile(fixedSource, build);
+    }
     scope (exit) fixedModel.close();
     auto fixedCsv = buildPath(root, "fixed.csv");
     auto fixedRun = execute([fixedModel.executable, "sample", "algorithm=fixed_param",
@@ -73,6 +116,7 @@ void main(string[] args)
     enforce(fixedRun.status == 0, fixedRun.output);
     auto fixedChain = readSampleCsv(fixedCsv);
     assert(fixedChain.comments.canFind("model = fixed_draws_model"));
+    assert(fixedChain.column("included_value") == [5, 5]);
     assert(fixedChain.column("x") == [42, 42] && fixedChain.warmupCount == 0);
     assert(fixedChain.variable("x").series() is fixedChain.column("x"));
     auto v = fixedChain.variable("v");
