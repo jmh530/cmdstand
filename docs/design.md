@@ -8,6 +8,8 @@ An explicit installation snapshots the selected root and release. Compilation in
 
 CmdStanD runs `stanc --info` in the original model directory with an ordered include search path. When the metadata lists included files, it runs `stanc --auto-format --canonicalize=includes` with the same source, working directory and search path, and writes the expanded program into staging. Make translates that file using the installation's build settings. This lets stanc resolve nested includes and report missing files against the original sources. Runtime diagnostics refer to the staged program's line numbers. Single-file models are copied verbatim.
 
+When requested, pedantic warnings are enabled during Stan-to-C++ translation. A second Make file appends the flag after CmdStan loads its configuration, preserving installation flags. The model handle exposes the combined compiler and Make log through `buildLogPath` until close.
+
 Persistent caching needs the resolved transitive include graph, effective options, installation and compiler identity, platform, and build-local settings. An executable timestamp alone cannot capture these inputs. Explicit model-handle reuse avoids this ambiguity.
 
 ## Chain and file ownership

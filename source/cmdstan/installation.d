@@ -34,6 +34,8 @@ struct CompileOptions
     /// Additional Stan include directories in search order, after the model's
     /// directory. Relative paths start at the caller's working directory.
     string[] includePaths;
+    /// Request stanc's pedantic warnings during translation. Defaults to false.
+    bool warnPedantic;
 }
 
 struct CmdStan
@@ -83,7 +85,7 @@ struct CmdStan
 
     /++ Params:
             source = Existing .stan file. Its directory is searched first for includes.
-            options = Additional include directories, GNU Make and staging path overrides.
+            options = Include directories, pedantic warnings, GNU Make and staging path overrides.
         Returns: A reusable compiled model. Call close when finished with it.
         Throws: CompilationException for invalid include directories or if
             translation or the upstream build fails. Additional directory paths
@@ -148,12 +150,22 @@ struct CmdStan
                 import std.string : replace;
                 auto makeTarget = target;
                 version (Windows) makeTarget = target.replace("\\", "/");
-                auto status = wait(spawnProcess([make, makeTarget], stdin, output, output, null,
+                string[] command = [make];
+                if (options.warnPedantic)
+                {
+                    // Read this after CmdStan's makefile so installation flags are preserved.
+                    auto flags = buildPath(directory, "pedantic.mk");
+                    std.file.write(flags, "ifeq ($(filter --warn-pedantic,$(STANCFLAGS)),)\n" ~
+                        "override STANCFLAGS += --warn-pedantic\nendif\n");
+                    version (Windows) flags = flags.replace("\\", "/");
+                    command ~= ["-f", "makefile", "-f", flags];
+                }
+                auto status = wait(spawnProcess(command ~ makeTarget, stdin, output, output, null,
                                                 Config.none, root));
                 enforce!CompilationException(status == 0 && exists(target),
                                               "GNU Make failed (exit " ~ status.to!string ~ ")");
             }
-            return new CompiledModel(directory, target, source, root, release);
+            return new CompiledModel(directory, target, source, root, release, log);
         }
         catch (Exception e)
         {

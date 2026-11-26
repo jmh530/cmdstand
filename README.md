@@ -115,6 +115,20 @@ Run the example from `examples/bernoulli` with `dub run`. The model compiles onc
 
 For direct control, use `writeStanJson(path, data)` and `runSample(executable, JsonFile(path), outputParent, options)`. The latter retains per-chain CSV, configuration, stdout and stderr below a unique run directory. The convenience API accepts the same `JsonFile`, a struct, string-keyed associative array, or named `JSONValue` object. Set `options.outputDir` to retain its artifacts. Otherwise it removes successful run files after parsing. Exceptions identify failed build or run directories for inspection and removal. Cooperative cancellation uses a `Cancellation` object in the options.
 
+### Inspect compiler warnings
+
+Set `warnPedantic` to request extra checks from stanc, such as warnings about distribution arguments on unusually large scales. If your CmdStan installation already enables pedantic warnings, both settings preserve them. Read `buildLogPath` while the model is open. Every successful build has a log, and `close()` removes it along with the executable.
+
+```d
+import std.file : readText;
+
+CompileOptions build;
+build.warnPedantic = true;
+auto model = stan.compile("models/survey.stan", build);
+scope (exit) model.close();
+auto diagnostics = readText(model.buildLogPath);
+```
+
 ### Models with Stan includes
 
 If `models/survey.stan` contains `#include helpers/centered.stan`, put the helper at `models/helpers/centered.stan` and call `stan.compile("models/survey.stan")` as usual. For shared libraries, add directories in the order you want them searched:
