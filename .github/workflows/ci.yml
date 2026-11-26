@@ -20,6 +20,18 @@ jobs:
       - run: dub test
       - run: dub run --root=tests/process
       - run: dub build --root=examples/bernoulli
+      - run: dub test :mir
+      - run: dub test
+        working-directory: mir
+      - name: Check Mir example traces
+        shell: pwsh
+        run: |
+          $rows = dub run --quiet --root=examples/mir-draws -- examples/draws/square.csv
+          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
+          $expected = @('saved_draw,theta,determinant', '1,1,5', '2,4,-2', '3,7,6')
+          if (($rows -join "`n") -cne ($expected -join "`n")) {
+            throw "Unexpected Mir example output:`n$($rows -join "`n")"
+          }
 
   integration:
     strategy:

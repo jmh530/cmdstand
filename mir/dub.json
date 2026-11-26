@@ -1,0 +1,10 @@
+{
+    "name": "mir",
+    "description": "Read-only Mir ndslice views of CmdStanD draws",
+    "license": "BSD-3-Clause",
+    "targetType": "library",
+    "dependencies": {
+        "cmdstand": {"path": ".."},
+        "mir-algorithm": "~>3.22.5"
+    }
+}

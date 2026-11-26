@@ -69,6 +69,28 @@ assert(a.series(1, 2, 3) is chain.column("A.2.3.4"));
 
 **What can a CSV tell you about the Stan type?** The labels give the indexed extents. The model declaration tells you what each axis means. For example, a `vector[3]`, a `row_vector[3]`, and an `array[3] real` all produce the labels `x.1, x.2, x.3`. Use the declaration to choose row or column orientation for linear algebra. See the [CmdStan CSV format](https://mc-stan.org/docs/cmdstan-guide/stan_csv_apdx.html).
 
+### Select a matrix with Mir
+
+Add the optional DUB dependency `cmdstand:mir` and import `cmdstan.mir : asSlice`. Use one selector for each axis, starting with the saved draw. An integer fixes one coordinate. A range keeps that axis, and `0 .. $` keeps its full length. For the array of matrices above:
+
+```d
+import cmdstan.mir : asSlice;
+
+auto draws = a.asSlice;                         // [draw, group, row, column]
+auto trace = draws[0 .. $, 1, 2, 3];            // One entry across all draws
+auto matrices = draws[0 .. $, 1, 0 .. $, 0 .. $]; // All matrices for group 1 (zero-based)
+foreach (matrix; matrices) { /* use matrix[row, col] */ }
+assert(matrices[0][2, 3] == trace[0]);         // Random access to the first matrix
+```
+
+The first bracket expression returns a native Mir slice with one axis per range, or a single value if every selector is an integer. A slice shares the draw buffer, keeps it alive, and exposes its elements as read-only. The selected matrix retains its row and column strides. To call an in-place factorization, copy the selected matrix into a writable workspace of the layout that routine expects. You can reuse the workspace for successive draws.
+
+The [Mir example](examples/mir-draws/app.d) follows a scalar trace and computes a determinant directly from each strided 2×2 matrix. Run it from the repository root to produce the same three plotting columns as the core example:
+
+```sh
+dub run --quiet --root=examples/mir-draws -- examples/draws/square.csv > traces.csv
+```
+
 ## Compile and sample
 
 Install [CmdStan](https://mc-stan.org/docs/cmdstan-guide/installation.html) and its GNU Make/C++ toolchain. The initial target releases are 2.39.0 and 2.40.0. Set `CMDSTAN` to the installation root or put a release under `~/.cmdstan/cmdstan-X.Y.Z`. An explicit installation uses `CmdStan.at(path)`. On Windows, make `mingw32-make`, the GNU toolchain and its runtime libraries available on PATH. Build staging and installation directories must have Make-compatible paths. Set `CompileOptions.stagingRoot` when the default temporary path contains spaces.
@@ -96,6 +118,7 @@ For direct control, use `writeStanJson(path, data)` and `runSample(executable, J
 ## Development
 
 - `dub test` runs fixture, discovery, and data tests.
+- `dub test :mir` runs the optional ndslice adapter tests from the repository root.
 - `dub run --root=tests/process` exercises subprocess scheduling and cleanup without CmdStan.
 - With `CMDSTAN` set, run `dub run --root=tests/integration -- examples/bernoulli/bernoulli.stan` from the repository root.
 - An additional empty output parent argument makes the integration suite export D-decoded columns. Run `python tests/cross_interface/check.py OUTPUT_PARENT` with CmdStanPy 1.3.2 installed to compare them independently.
