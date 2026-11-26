@@ -5,6 +5,7 @@ import cmdstan.json : JsonFile;
 import cmdstan.internal.workspace : removeArtifactDirectory;
 import cmdstan.sampling : SampleFit, SampleOptions, sampleData;
 import std.exception : enforce;
+import std.traits : isArray, isAssociativeArray, isSomeString;
 
 final class CompiledModel
 {
@@ -33,7 +34,26 @@ final class CompiledModel
     SampleFit sample(T)(auto ref const T data, SampleOptions options = SampleOptions.init)
     {
         enforce(directory.length, "Compiled model is closed");
-        return sampleData(executable, data, options);
+        return sampleData(executable, data, options, null);
+    }
+
+    /++ Params:
+            T = Named Stan data type or JsonFile.
+            I = Named initialization type, JsonFile, or an array of either.
+            data = Named model data or a borrowed data file.
+            options = Sampling settings. zeroInit must be false.
+            initial = One named object or file shared by all chains, or one
+                per chain in launch order. Parameter values use Stan's
+                constrained scale. Existing files remain caller-owned.
+        Returns: In-memory draws. Serialized initial values share the run's
+            output lifetime, including retention when outputDir is supplied.
+        Throws: Exception for a closed model, invalid inputs or a failed run.
+    +/
+    SampleFit sample(T, I)(auto ref const T data, SampleOptions options, auto ref const I initial)
+        if (is(I == struct) || isAssociativeArray!I || (isArray!I && !isSomeString!I))
+    {
+        enforce(directory.length, "Compiled model is closed");
+        return sampleData(executable, data, options, initial);
     }
 
     /++ Returns: Releases the model's private build directory. Repeated calls are safe.

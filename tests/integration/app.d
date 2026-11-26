@@ -41,6 +41,49 @@ private void checkPedanticWarnings(CmdStan stan, string directory)
     }
 }
 
+private void checkInitialValues(CompiledModel model, JsonFile data, string root)
+{
+    struct Init { double theta; }
+    auto starts = [Init(0.25), Init(0.75)];
+    SampleOptions o;
+    o.chains = 2;
+    o.seed = 12345;
+    o.warmup = 30;
+    o.samples = 8;
+    {
+        import std.exception : assertThrown;
+        import std.json : parseJSON;
+        import std.range : empty;
+        o.outputDir = buildPath(root, "invalid initial values");
+        auto values = [parseJSON(`{"theta":0.25}`), parseJSON("[]")];
+        assertThrown!StanDataException(model.sample(data, o, values));
+        assert(dirEntries(o.outputDir, SpanMode.shallow).empty);
+    }
+    foreach (sharedStart; [true, false])
+    {
+        o.outputDir = sharedStart ? null : root;
+        auto fit = sharedStart ? model.sample(data, o, starts[0]) : model.sample(data, o, starts);
+        assert((fit.artifacts.directory.length == 0) == sharedStart);
+        foreach (i; 0 .. starts.length)
+        {
+            auto init = buildPath(root, "reference init.json");
+            writeStanJson(init, starts[sharedStart ? 0 : i]);
+            if (!sharedStart)
+                assert(readText(buildPath(fit.artifacts.directory, "init-" ~ (i + 1).to!string ~ ".json"))
+                       == readText(init));
+            auto csv = buildPath(root, "reference init draws.csv");
+            auto result = execute([model.executable, "sample", "num_warmup=30", "num_samples=8",
+                "init=" ~ init, "id=" ~ (i + 1).to!string, "random", "seed=12345",
+                "data", "file=" ~ data.path, "output", "file=" ~ csv, "sig_figs=17", "refresh=0"],
+                null, Config.none, size_t.max, root);
+            enforce(result.status == 0, result.output);
+            auto direct = readSampleCsv(csv);
+            foreach (name; direct.columnNames)
+                assert(fit.chain(i).column(name) == direct.column(name), name);
+        }
+    }
+}
+
 void main(string[] args)
 {
     enforce(args.length == 2 || args.length == 3,
@@ -74,6 +117,7 @@ void main(string[] args)
     auto data = Survey(10, [0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
     auto input = JsonFile(buildPath(root, "survey data.json"));
     writeStanJson(input.path, data);
+    checkInitialValues(model, input, root);
 
     SampleOptions o;
     o.chains = o.parallelChains = 2;

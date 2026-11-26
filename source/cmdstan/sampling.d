@@ -14,6 +14,7 @@ import std.path : buildPath;
 import std.process : Pid, ProcessException, spawnProcess, wait, kill, Config;
 import std.random : uniform;
 import std.stdio : File, stdin;
+import std.traits : isArray, Unqual;
 
 class SamplingException : Exception
 {
@@ -70,9 +71,68 @@ struct SampleRun
 +/
 SampleRun runSample(string executable, JsonFile data, string outputDir, SampleOptions options = SampleOptions.init)
 {
+    return runFiles(executable, data, outputDir, options, null);
+}
+
+/++ Params:
+        I = JsonFile or an array of JsonFile values.
+        executable = Existing compiled model.
+        data = Caller-owned Stan data file.
+        outputDir = Parent directory for a new retained run.
+        options = Sampling configuration. zeroInit must be false.
+        initial = One file shared across chains, or exactly one file per chain
+            in launch order. Names must end in .json. Relative paths start at
+            the caller's working directory.
+    Returns: Retained artifacts and process metadata in chain ID order.
+    Throws: SamplingException for invalid options, missing files, cancellation
+        or a failed child. The caller retains ownership of all input files.
++/
+SampleRun runSample(I)(string executable, JsonFile data, string outputDir, SampleOptions options,
+                       auto ref const I initial)
+    if (is(Unqual!I == JsonFile) || (isArray!I && is(Unqual!(typeof(initial[0])) == JsonFile)))
+{
+    return runFiles(executable, data, outputDir, options, initialPaths(initial, options, null));
+}
+
+private SampleRun runFiles(string executable, JsonFile data, string outputDir, SampleOptions options,
+                           string[] paths)
+{
     enforce!SamplingException(outputDir.length, "A retained output directory is required");
     validate(executable, data, options);
-    return executeChains(fullPath(executable), fullPath(data.path), newDirectory(outputDir, "run-"), options);
+    return executeChains(fullPath(executable), fullPath(data.path), newDirectory(outputDir, "run-"), options, paths);
+}
+
+private string[] initialPaths(I)(auto ref const I initial, SampleOptions o, string directory)
+{
+    enforce!SamplingException(!o.zeroInit, "Explicit initialization conflicts with zeroInit");
+    static if (isArray!I)
+    {
+        enforce!SamplingException(initial.length == o.chains, "Expected one initialization per chain");
+        auto paths = new string[initial.length];
+        foreach (i, ref value; initial)
+            paths[i] = initialFile(value, directory, i + 1);
+        return paths;
+    }
+    else return [initialFile(initial, directory, 0)];
+}
+
+private string initialFile(I)(auto ref const I value, string directory, size_t id)
+{
+    static if (is(Unqual!I == JsonFile))
+    {
+        import std.path : absolutePath;
+        import std.algorithm : endsWith;
+        auto path = absolutePath(value.path);
+        enforce!SamplingException(path.length && exists(path) && isFile(path), "Missing initialization file " ~ path);
+        enforce!SamplingException(path.endsWith(".json"), "Initialization file must end in .json: " ~ path);
+        return path;
+    }
+    else
+    {
+        auto path = buildPath(directory, id ? "init-" ~ id.to!string ~ ".json" : "init.json");
+        writeStanJson(path, value);
+        return path;
+    }
 }
 
 private void validate(string exe, JsonFile data, SampleOptions o)
@@ -85,13 +145,15 @@ private void validate(string exe, JsonFile data, SampleOptions o)
                               o.warmup <= int.max && o.thin <= int.max, "Counts exceed CmdStan integer range");
 }
 
-private string[] command(string exe, string data, string csv, SampleOptions o, uint id, uint seed)
+private string[] command(string exe, string data, string csv, SampleOptions o, uint id, uint seed,
+                         string[] paths)
 {
     auto args = [exe, "sample", "num_samples=" ~ o.samples.to!string,
                  "num_warmup=" ~ o.warmup.to!string, "thin=" ~ o.thin.to!string,
                  o.saveWarmup ? "save_warmup=1" : "save_warmup=0", "id=" ~ id.to!string,
                  "random", "seed=" ~ seed.to!string, "data", "file=" ~ data];
     if (o.zeroInit) args ~= "init=0";
+    if (paths.length) args ~= "init=" ~ paths[paths.length == 1 ? 0 : id - 1];
     return args ~ ["output", "file=" ~ csv, "sig_figs=17", "refresh=0", "save_cmdstan_config=1"];
 }
 
@@ -106,7 +168,7 @@ version (Windows)
 }
 else private import std.process : pollChild = tryWait;
 
-private SampleRun executeChains(string exe, string data, string directory, SampleOptions o)
+private SampleRun executeChains(string exe, string data, string directory, SampleOptions o, string[] paths)
 {
     SampleRun run;
     run.directory = directory;
@@ -129,7 +191,7 @@ private SampleRun executeChains(string exe, string data, string directory, Sampl
                 c.csv = buildPath(cwd, "draws.csv");
                 c.stdoutLog = buildPath(cwd, "stdout.log");
                 c.stderrLog = buildPath(cwd, "stderr.log");
-                c.argv = command(exe, data, c.csv, o, c.id, run.seed);
+                c.argv = command(exe, data, c.csv, o, c.id, run.seed, paths);
                 auto outFile = File(c.stdoutLog, "wb");
                 auto errFile = File(c.stderrLog, "wb");
                 // This milestone schedules single-threaded chains; leave the parent environment alone.
@@ -227,10 +289,12 @@ struct SampleFit
     const(ChainDraws) chain(size_t index) const @safe { return draws[index]; }
 }
 
-package SampleFit sampleData(T)(string exe, auto ref const T data, SampleOptions o)
+package SampleFit sampleData(T, I)(string exe, auto ref const T data, SampleOptions o,
+                                  auto ref const I initial)
 {
     auto directory = newDirectory(o.outputDir, "run-");
     JsonFile input;
+    string[] paths;
     try
     {
         static if (is(T == JsonFile)) input = JsonFile(fullPath(data.path));
@@ -240,10 +304,11 @@ package SampleFit sampleData(T)(string exe, auto ref const T data, SampleOptions
             writeStanJson(input.path, data);
         }
         validate(exe, input, o);
+        static if (!is(I == typeof(null))) paths = initialPaths(initial, o, directory);
     }
     catch (Exception e) { rmdirRecurse(directory); throw e; }
 
-    auto run = executeChains(exe, input.path, directory, o);
+    auto run = executeChains(exe, input.path, directory, o, paths);
     SampleFit fit;
     foreach (ref c; run.chains)
     {

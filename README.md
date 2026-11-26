@@ -115,6 +115,22 @@ Run the example from `examples/bernoulli` with `dub run`. The model compiles onc
 
 For direct control, use `writeStanJson(path, data)` and `runSample(executable, JsonFile(path), outputParent, options)`. The latter retains per-chain CSV, configuration, stdout and stderr below a unique run directory. The convenience API accepts the same `JsonFile`, a struct, string-keyed associative array, or named `JSONValue` object. Set `options.outputDir` to retain its artifacts. Otherwise it removes successful run files after parsing. Exceptions identify failed build or run directories for inspection and removal. Cooperative cancellation uses a `Cancellation` object in the options.
 
+### Choose initial parameter values
+
+Pass a named object as the third argument to `sample` to share one starting point across chains. Pass an array with one object for each chain to choose distinct starting points. Use the parameter names and constrained values from the Stan model. For example, a Bernoulli probability `theta` can start at 0.25:
+
+```d
+struct Init { double theta; }
+SampleOptions options;
+options.chains = 2;
+auto sharedFit = model.sample(data, options, Init(0.25));
+auto separateFit = model.sample(data, options, [Init(0.25), Init(0.75)]);
+```
+
+Entry zero belongs to chain ID 1, even when chains run one at a time. Structs, string-keyed associative arrays, and JSON objects use the same serializer as model data. CmdStanD writes these initial values inside the run directory, which follows the usual `outputDir` retention rules.
+
+For existing files, pass a `JsonFile` or an array of them to either `model.sample(data, options, initial)` or `runSample(executable, dataFile, outputParent, options, initial)`. Initialization filenames must end in lowercase `.json`. Relative file paths start at the caller's working directory, and the caller retains ownership. Omit the argument for CmdStan's default initialization, or set `zeroInit` for zero on the unconstrained scale. Combining `zeroInit` with explicit values raises `SamplingException`.
+
 ### Inspect compiler warnings
 
 Set `warnPedantic` to request extra checks from stanc, such as warnings about distribution arguments on unusually large scales. If your CmdStan installation already enables pedantic warnings, both settings preserve them. Read `buildLogPath` while the model is open. Every successful build has a log, and `close()` removes it along with the executable.

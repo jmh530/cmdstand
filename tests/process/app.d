@@ -54,6 +54,41 @@ int main(string[] args)
         assert(!exists(temporary));
     }
     auto input = JsonFile(buildPath(root, "borrowed data.json"));
+    {
+        import std.exception : assertThrown;
+        auto previous = getcwd();
+        chdir(root);
+        scope (exit) chdir(previous);
+        SampleOptions serial;
+        serial.chains = 2;
+        JsonFile[] initial = [JsonFile("start one.json"), JsonFile("start two.json")];
+        write(initial[0].path, "first");
+        write(initial[1].path, "second");
+        write(input.path, "inspect init");
+        auto perChain = runSample(thisExePath(), input, root, serial, initial);
+        assert(readText(perChain.chains[0].csv) == "first");
+        assert(readText(perChain.chains[1].csv) == "second");
+        auto sharedRun = runSample(thisExePath(), input, root, serial, initial[0]);
+        foreach (c; sharedRun.chains) assert(readText(c.csv) == "first");
+        assertThrown!SamplingException(runSample(thisExePath(), input, root, serial, initial[0 .. 1]));
+        auto rejected = buildPath(root, "rejected initializations");
+        mkdir(rejected);
+        foreach (name; ["second.txt", "second.JSON", "second.R"])
+        {
+            import std.algorithm : canFind;
+            import std.range : empty;
+            initial[1] = JsonFile(name);
+            write(name, `{"theta":0.75}`);
+            try { runSample(thisExePath(), input, rejected, serial, initial); assert(0); }
+            catch (SamplingException e) { assert(e.msg.canFind(absolutePath(name)), e.msg); }
+            assert(dirEntries(rejected, SpanMode.shallow).empty);
+        }
+        initial[1] = JsonFile("absent.json");
+        assertThrown!SamplingException(runSample(thisExePath(), input, root, serial, initial));
+        serial.zeroInit = true;
+        assertThrown!SamplingException(runSample(thisExePath(), input, root, serial, initial[0]));
+        assert(readText(initial[0].path) == "first");
+    }
     SampleOptions o;
     o.chains = 3;
     o.parallelChains = 2;
@@ -96,12 +131,13 @@ int main(string[] args)
 
 private int fakeChild(string[] args)
 {
-    string input, output, id;
+    string input, output, id, initial;
     foreach (i, arg; args)
     {
         if (arg == "data") input = args[i + 1]["file=".length .. $];
         if (arg == "output") output = args[i + 1]["file=".length .. $];
         if (arg.startsWith("id=")) id = arg[3 .. $];
+        if (arg.startsWith("init=")) initial = arg[5 .. $];
     }
     enforce(baseName(getcwd()) == "chain-" ~ id);
     // getcwd can resolve a symlink in the supplied output directory.
@@ -109,6 +145,11 @@ private int fakeChild(string[] args)
     enforce(exists(buildPath(dirName(output), "ready")));
     enforce(environment["STAN_NUM_THREADS"] == "1");
     auto scenario = readText(input);
+    if (scenario == "inspect init")
+    {
+        write(output, readText(initial));
+        return 0;
+    }
     if (scenario == "fail" && id == "1") return 17;
     if (scenario == "cancel" && id == "1") write(input ~ ".started", "ready");
     if (scenario != "success") { Thread.sleep(15.seconds); return 1; }
