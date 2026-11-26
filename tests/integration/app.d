@@ -4,9 +4,42 @@ import std.conv : to;
 import std.exception : enforce;
 import std.file;
 import std.path;
-import std.process : Config, execute;
+import std.process : Config, environment, execute;
 import std.stdio;
 import std.uuid : randomUUID;
+
+private void checkPedanticWarnings(CmdStan stan, string directory)
+{
+    auto source = buildPath(directory, "pedantic.stan");
+    enum prior = "y ~ normal(0, 1000);\n";
+    std.file.write(buildPath(directory, "prior.stan"), prior);
+    // Give these fixture builds known effective flags, independent of make/local.
+    auto hadMakeFlags = "MAKEFLAGS" in environment;
+    auto previous = environment.get("MAKEFLAGS", "");
+    scope (exit)
+    {
+        if (hadMakeFlags) environment["MAKEFLAGS"] = previous;
+        else environment.remove("MAKEFLAGS");
+    }
+    foreach (inherited; [false, true])
+    foreach (body; [prior, "#include prior.stan\n"])
+    {
+        environment["MAKEFLAGS"] = inherited ? "STANCFLAGS=--warn-pedantic" : "STANCFLAGS=";
+        std.file.write(source, "parameters { real y; }\nmodel {\n" ~ body ~ "}\n");
+        foreach (enabled; [false, true])
+        {
+            CompileOptions options;
+            options.warnPedantic = enabled;
+            auto model = stan.compile(source, options);
+            scope (exit) model.close();
+            auto log = readText(model.buildLogPath);
+            assert(log.canFind("Argument 1000 suggests") == (inherited || enabled), log);
+            assert(!log.canFind("Duplicated flag '--warn-pedantic'"), log);
+            model.close();
+            assert(!exists(model.buildLogPath));
+        }
+    }
+}
 
 void main(string[] args)
 {
@@ -18,6 +51,7 @@ void main(string[] args)
     auto source = buildPath(root, "Bernoulli survey.stan");
     copy(args[1], source);
     auto stan = CmdStan.discover();
+    checkPedanticWarnings(stan, root);
     auto broken = buildPath(root, "broken.stan");
     std.file.write(broken, "parameters { this is invalid Stan; }");
     try { stan.compile(broken); assert(0, "invalid Stan was accepted"); }

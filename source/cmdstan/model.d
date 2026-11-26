@@ -10,13 +10,17 @@ final class CompiledModel
 {
     private string directory;
     immutable string executable, sourcePath, installationPath, cmdstanVersion;
-    package this(string directory, string executable, string source, string root, string release)
+    /// Absolute path to the compiler and Make log. close() removes the file.
+    immutable string buildLogPath;
+    package this(string directory, string executable, string source, string root, string release,
+                 string log)
     {
         this.directory = directory;
         this.executable = executable;
         sourcePath = source;
         installationPath = root;
         cmdstanVersion = release;
+        buildLogPath = log;
     }
 
     /++ Params:
