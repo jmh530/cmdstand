@@ -10,6 +10,9 @@ __test__*
 /cmdstand-test-*
 /examples/bernoulli/bernoulli-demo
 /examples/draws/draw-traces
+/examples/mir-draws/mir-draw-traces
+/mir/cmdstand-mir-test-library
+/mir/mir-test-library
 /tests/integration/integration
 /tests/process/process-check
 /cmdstand

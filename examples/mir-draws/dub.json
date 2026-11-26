@@ -1,0 +1,7 @@
+{
+    "name": "mir-draw-traces",
+    "targetType": "executable",
+    "sourceFiles": ["app.d"],
+    "mainSourceFile": "app.d",
+    "dependencies": {"cmdstand:mir": {"path": "../.."}}
+}
