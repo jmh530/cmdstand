@@ -11,7 +11,7 @@ import std.conv : to;
 import std.exception : basicExceptionCtors, enforce;
 import std.file;
 import std.path : absolutePath, baseName, buildPath, dirName, expandTilde, extension;
-import std.process : Config, ProcessException, environment, spawnProcess, wait;
+import std.process : Config, ProcessException, environment, execute, spawnProcess, wait;
 import std.stdio : File, stdin;
 import std.string : splitLines, strip;
 
@@ -20,6 +20,7 @@ else private enum suffix = "";
 
 class InstallationException : Exception { mixin basicExceptionCtors; }
 class SummaryException : Exception { mixin basicExceptionCtors; }
+class DiagnoseException : Exception { mixin basicExceptionCtors; }
 class CompilationException : Exception
 {
     /// Owned staging directory retained after a build attempt.
@@ -40,6 +41,7 @@ struct CompileOptions
     bool warnPedantic;
 }
 
+/// An existing CmdStan installation used to build models and run its command-line tools.
 struct CmdStan
 {
     private string root, release;
@@ -193,7 +195,7 @@ struct CmdStan
             "Expected a CmdStan installation and at least one chain CSV");
         auto program = buildPath(root, "bin", "stansummary" ~ suffix);
         enforce!SummaryException(exists(program) && isFile(program), "Missing stansummary: " ~ program);
-        auto inputs = summaryInputs(csvPaths);
+        auto inputs = chainCsvInputs!SummaryException(csvPaths);
         auto directory = newDirectory(null, "cmdstand-summary-");
         scope (exit) removeArtifactDirectory(directory);
         auto csv = buildPath(directory, "summary.csv");
@@ -211,6 +213,64 @@ struct CmdStan
         }
         enforce!SummaryException(status == 0, "stansummary exited with code " ~ status.to!string ~ "\n" ~ tail(log));
         return readSummaryCsv(csv);
+    }
+
+    /++ Run CmdStan's sampler diagnostics on the saved chains from one HMC fit.
+
+        The selected installation's `diagnose` executable checks the available
+        sampler columns for divergences, transitions that hit maximum tree depth,
+        and poor energy exploration (low E-BFMI). It also checks parameter draws
+        for low effective sample size and high split R-hat.
+
+        Params:
+            csvPaths = Paths to one or more distinct CmdStan sampling CSV files.
+                Pass the paths individually or as an array. Relative paths start
+                at the current working directory. For a fit retained with
+                `SampleOptions.outputDir`, use the CSV path from each entry in
+                `fit.artifacts.chains`. The caller retains ownership of the files.
+        Returns: The tool's human-readable report as a string, including any
+            sampling problems it found. The report remains usable after the
+            caller removes the chain files.
+        Throws: `DiagnoseException` if no paths are supplied, an input is missing
+            or repeated, or the saved warmup settings or boundary are invalid.
+            It also indicates that the executable is unavailable, failed, or
+            skipped a requested file. For a nonzero exit, the exception message
+            includes the exit code and captured output. Filesystem errors may
+            raise I/O exceptions.
+    +/
+    string diagnose(const(string)[] csvPaths...) const
+    {
+        enforce!DiagnoseException(root.length && csvPaths.length,
+            "Expected a CmdStan installation and at least one chain CSV");
+        auto program = buildPath(root, "bin", "diagnose" ~ suffix);
+        enforce!DiagnoseException(exists(program) && isFile(program), "Missing diagnose: " ~ program);
+        auto inputs = chainCsvInputs!DiagnoseException(csvPaths);
+        try
+        {
+            auto result = execute([program] ~ inputs);
+            enforce!DiagnoseException(result.status == 0,
+                "diagnose exited with code " ~ result.status.to!string ~ "\n" ~ result.output);
+            // Both supported releases report skipped files first and can exit zero
+            // if another input was readable (e.g. a path disappeared after validation).
+            enforce!DiagnoseException(!result.output.startsWith("File "), result.output);
+            return result.output;
+        }
+        catch (ProcessException e)
+        {
+            throw new DiagnoseException(program ~ ": " ~ e.msg);
+        }
+    }
+
+    ///
+    unittest
+    {
+        // Run this after saving both chains from the same fit.
+        void printDiagnostics(CmdStan stan, string firstChain, string secondChain)
+        {
+            import std.stdio : write;
+            auto report = stan.diagnose(firstChain, secondChain);
+            write(report);
+        }
     }
 
     private static CmdStan findRelease(string parent)
@@ -295,27 +355,27 @@ private FileIdentity fileIdentity(File file)
     }
 }
 
-private string[] summaryInputs(const(string)[] paths)
+private string[] chainCsvInputs(E)(const(string)[] paths)
 {
     string[] inputs;
     bool[FileIdentity] seen;
     foreach (path; paths)
     {
-        enforce!SummaryException(path.length && exists(path) && isFile(path), "Missing chain CSV: " ~ path);
+        enforce!E(path.length && exists(path) && isFile(path), "Missing chain CSV: " ~ path);
         auto file = File(path, "rb");
         if (paths.length > 1)
         {
             auto id = fileIdentity(file);
-            enforce!SummaryException(id !in seen, "Repeated chain CSV: " ~ path);
+            enforce!E(id !in seen, "Repeated chain CSV: " ~ path);
             seen[id] = true;
         }
-        checkWarmupBoundary(file);
+        checkWarmupBoundary!E(file);
         inputs ~= absolutePath(path);
     }
     return inputs;
 }
 
-private void checkWarmupBoundary(File file)
+private void checkWarmupBoundary(E)(File file)
 {
     import std.conv : ConvException;
     import std.string : indexOf;
@@ -343,18 +403,18 @@ private void checkWarmupBoundary(File file)
         {
             case "algorithm": fixedParam = value == "fixed_param"; break;
             case "save_warmup":
-                enforce!SummaryException(["1", "0", "true", "false"].canFind(value),
+                enforce!E(["1", "0", "true", "false"].canFind(value),
                     file.name ~ ": invalid save_warmup");
                 saved = value == "1" || value == "true";
                 break;
             case "num_warmup":
                 try { hasWarmup = value.to!ulong != 0; }
-                catch (ConvException) { throw new SummaryException(file.name ~ ": invalid num_warmup"); }
+                catch (ConvException) { throw new E(file.name ~ ": invalid num_warmup"); }
                 break;
             default: break;
         }
     }
-    enforce!SummaryException(!headerRead, file.name ~ ": missing comment after saved warmup");
+    enforce!E(!headerRead, file.name ~ ": missing comment after saved warmup");
 }
 
 unittest
@@ -365,22 +425,22 @@ unittest
     auto path = buildPath(root, "chain.csv");
     enum saved = "# save_warmup = true (Default)\n# num_warmup = 10\n";
     write(path, saved ~ "lp__,x\n1,2\n  # not a boundary\n");
-    assertThrown!SummaryException(summaryInputs([path]));
+    assertThrown!SummaryException(chainCsvInputs!SummaryException([path]));
     write(path, saved ~ "lp__,x\n1,2\n# Adaptation terminated\n1,3\n");
-    assert(summaryInputs([path]) == [path]);
-    assertThrown!SummaryException(summaryInputs([path, path]));
+    assert(chainCsvInputs!SummaryException([path]) == [path]);
+    assertThrown!SummaryException(chainCsvInputs!SummaryException([path, path]));
     enum fixture = "tests/fixtures/bernoulli-2.39.0.csv";
-    assertThrown!SummaryException(summaryInputs([fixture, absolutePath(fixture)]));
+    assertThrown!SummaryException(chainCsvInputs!SummaryException([fixture, absolutePath(fixture)]));
     version (Posix)
     {
         auto aliasPath = buildPath(root, "alias.csv");
         symlink(path, aliasPath);
-        assertThrown!SummaryException(summaryInputs([path, aliasPath]));
+        assertThrown!SummaryException(chainCsvInputs!SummaryException([path, aliasPath]));
     }
     foreach (setting; ["# num_warmup = 0\n", "# save_warmup = 0\n", "# algorithm = fixed_param\n"])
     {
         write(path, saved ~ setting ~ "lp__,x\n1,2\n");
-        assert(summaryInputs([path]) == [path]);
+        assert(chainCsvInputs!SummaryException([path]) == [path]);
     }
 }
 

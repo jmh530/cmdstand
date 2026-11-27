@@ -34,6 +34,8 @@ The optional DUB subpackage `cmdstand:mir` exposes a runtime-rank indexing handl
 
 Before launching the tool on multiple chains, CmdStanD checks the identity of each file so aliases of the same file cannot count twice. For chains with saved warmup, it streams through the warmup rows to check for the comment where the upstream reader resumes. This prevents an interrupted file from leaving the tool waiting at end of file.
 
+`CmdStan.diagnose` uses the same chain file checks and returns the installed tool's text report. CmdStan 2.39.0 and 2.40.0 exit successfully even when they report divergences or poor mixing. A nonzero exit raises `DiagnoseException` with the captured output. Both versions can also skip an unreadable file and exit successfully when another file opens. The wrapper treats that upstream message as a failure so the report covers every requested chain.
+
 ## Upstream evidence
 
 - [CmdStan 2.40.0 build rules](https://github.com/stan-dev/cmdstan/blob/v2.40.0/make/program) and [upstream multi-chain tests](https://github.com/stan-dev/cmdstan/blob/v2.40.0/src/test/interface/multi_chain_test.cpp) define the actual process contract. Inspected 2.39.0, 2.40.0 and development revision 11c2e3d1.
