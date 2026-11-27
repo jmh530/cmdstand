@@ -41,6 +41,33 @@ private void checkPedanticWarnings(CmdStan stan, string directory)
     }
 }
 
+private void checkImportedChainIds(CompiledModel model, JsonFile data, string root)
+{
+    import std.exception : assertThrown;
+    void sample(string output, string id, string count)
+    {
+        auto result = execute([model.executable, "sample", "num_samples=3", "num_warmup=0",
+            "num_chains=" ~ count, "adapt", "engaged=0", "id=" ~ id, "random", "seed=369",
+            "data", "file=" ~ data.path, "output", "file=" ~ output], null, Config.none, size_t.max, root);
+        enforce(result.status == 0, result.output);
+    }
+    sample("native.csv", "7", "2");
+    auto a = buildPath(root, "native_7.csv");
+    auto b = buildPath(root, "native_8.csv");
+    auto native = readSampleFit(b, a);
+    assert(native.chain(0).chainId == 8 && native.chain(1).chainId == 7);
+    assert(native.chain(0).column("theta") == readSampleCsv(b).column("theta"));
+    assert(readSampleFit(b).chain(0).chainId == 8);
+    assertThrown!SamplingException(readSampleFit(b, b));
+    sample("left.csv,right.csv", "7", "2");
+    auto named = readSampleFit(buildPath(root, "right.csv"), buildPath(root, "left.csv"));
+    assert(named.chain(0).chainId == 8 && named.chain(1).chainId == 7);
+    sample("zero.csv", "0", "1");
+    sample("one.csv", "1", "1");
+    auto singletons = readSampleFit(buildPath(root, "zero.csv"), buildPath(root, "one.csv"));
+    assert(singletons.chain(0).chainId == 0 && singletons.chain(1).chainId == 1);
+}
+
 private void checkInitialValues(CompiledModel model, JsonFile data, string root)
 {
     struct Init { double theta; }
@@ -117,6 +144,7 @@ void main(string[] args)
     auto data = Survey(10, [0, 1, 0, 0, 0, 0, 0, 0, 0, 1]);
     auto input = JsonFile(buildPath(root, "survey data.json"));
     writeStanJson(input.path, data);
+    checkImportedChainIds(model, input, root);
     checkInitialValues(model, input, root);
 
     SampleOptions o;
@@ -228,10 +256,14 @@ void main(string[] args)
                 assert(warmA.series(g, r, c).length == 0);
             }
     auto files = runSample(model.executable, input, root, o);
+    auto reopened = readSampleFit(files.chains[1].csv, files.chains[0].csv);
+    assert(reopened.chainCount == 2 && reopened.seed == o.seed);
     assert(fit.chainCount == 2 && fit.seed == o.seed);
     foreach (i; 0 .. fit.chainCount)
     {
         auto chain = fit.chain(i);
+        auto imported = reopened.chain(1 - i);
+        assert(imported.chainId == chain.chainId);
         auto id = to!string(i + 1);
         auto direct = buildPath(root, "direct " ~ id ~ ".csv");
         auto result = execute([model.executable, "sample", "num_samples=31", "num_warmup=100",
@@ -246,6 +278,8 @@ void main(string[] args)
         foreach (name; chain.columnNames)
         {
             assert(chain.column(name) == raw.column(name));
+            assert(imported.column(name) == raw.column(name));
+            assert(imported.warmupColumn(name) == raw.warmupColumn(name));
             assert(chain.warmupColumn(name) == raw.warmupColumn(name));
             assert(chain.column(name) == transient.chain(i).column(name));
             assert(chain.column(name) == fileRun.column(name));
