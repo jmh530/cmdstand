@@ -28,6 +28,7 @@ class CompilationException : Exception
     mixin basicExceptionCtors;
 }
 
+/// Settings for building a model with an existing CmdStan installation.
 struct CompileOptions
 {
     /// Parent for unique build directories. GNU Make must accept this path.
@@ -39,6 +40,8 @@ struct CompileOptions
     string[] includePaths;
     /// Request stanc's pedantic warnings during translation. Defaults to false.
     bool warnPedantic;
+    /// Request STAN_THREADS=true for this build. By default, use the installation's settings.
+    bool enableThreads;
 }
 
 /// An existing CmdStan installation used to build models and run its command-line tools.
@@ -89,7 +92,7 @@ struct CmdStan
 
     /++ Params:
             source = Existing .stan file. Its directory is searched first for includes.
-            options = Include directories, pedantic warnings, GNU Make and staging path overrides.
+            options = Include directories, pedantic warnings, thread support, GNU Make and staging path overrides.
         Returns: A reusable compiled model. Call close when finished with it.
         Throws: CompilationException for invalid include directories or if
             translation or the upstream build fails. Additional directory paths
@@ -155,6 +158,7 @@ struct CmdStan
                 auto makeTarget = target;
                 version (Windows) makeTarget = target.replace("\\", "/");
                 string[] command = [make];
+                if (options.enableThreads) command ~= "STAN_THREADS=true";
                 if (options.warnPedantic)
                 {
                     // Read this after CmdStan's makefile so installation flags are preserved.

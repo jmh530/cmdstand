@@ -33,6 +33,7 @@ final class Cancellation
     @property bool cancelled() @safe nothrow { return requested.atomicLoad; }
 }
 
+/// Settings shared by file-oriented and in-memory sampling.
 struct SampleOptions
 {
     uint chains = 1, parallelChains = 1;
@@ -41,6 +42,9 @@ struct SampleOptions
     bool saveWarmup, zeroInit;
     string outputDir; /// Optional parent for persistent high-level runs.
     Cancellation cancellation;
+    /// Maximum threads per chain process, from 1 (default) to int.max.
+    /// Values above one require a model compiled with Stan thread support.
+    uint threadsPerChain = 1;
 }
 
 enum ChainState { queued, running, succeeded, failed, cancelled }
@@ -141,6 +145,8 @@ private void validate(string exe, JsonFile data, SampleOptions o)
     enforce!SamplingException(exists(data.path) && isFile(data.path), "Missing JSON data " ~ data.path);
     enforce!SamplingException(o.chains && o.parallelChains && o.samples && o.thin,
                               "chains, parallelChains, samples and thin must be positive");
+    enforce!SamplingException(o.threadsPerChain > 0 && o.threadsPerChain <= int.max,
+                              "threadsPerChain must be between 1 and int.max");
     enforce!SamplingException(o.chains <= int.max && o.samples <= int.max &&
                               o.warmup <= int.max && o.thin <= int.max, "Counts exceed CmdStan integer range");
 }
@@ -153,6 +159,7 @@ private string[] command(string exe, string data, string csv, SampleOptions o, u
                  o.saveWarmup ? "save_warmup=1" : "save_warmup=0", "id=" ~ id.to!string,
                  "random", "seed=" ~ seed.to!string, "data", "file=" ~ data];
     if (o.zeroInit) args ~= "init=0";
+    if (o.threadsPerChain > 1) args ~= "num_threads=" ~ o.threadsPerChain.to!string;
     if (paths.length) args ~= "init=" ~ paths[paths.length == 1 ? 0 : id - 1];
     return args ~ ["output", "file=" ~ csv, "sig_figs=17", "refresh=0", "save_cmdstan_config=1"];
 }
@@ -194,9 +201,8 @@ private SampleRun executeChains(string exe, string data, string directory, Sampl
                 c.argv = command(exe, data, c.csv, o, c.id, run.seed, paths);
                 auto outFile = File(c.stdoutLog, "wb");
                 auto errFile = File(c.stderrLog, "wb");
-                // This milestone schedules single-threaded chains; leave the parent environment alone.
                 children[next] = spawnProcess(c.argv, stdin, outFile, errFile,
-                                              ["STAN_NUM_THREADS": "1"], Config.none, cwd);
+                                              ["STAN_NUM_THREADS": o.threadsPerChain.to!string], Config.none, cwd);
                 c.state = ChainState.running;
                 ++active;
                 ++next;

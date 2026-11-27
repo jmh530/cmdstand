@@ -159,6 +159,27 @@ scope (exit) model.close();
 auto diagnostics = readText(model.buildLogPath);
 ```
 
+### Use threads within a chain
+
+For a model that distributes work with `reduce_sum`, request thread support when compiling and choose the number of threads when sampling:
+
+```d
+import cmdstan;
+
+CompileOptions build;
+build.enableThreads = true;
+auto model = CmdStan.discover().compile("models/threaded_likelihood.stan", build);
+scope (exit) model.close();
+
+SampleOptions options;
+options.chains = 4;
+options.parallelChains = 2;
+options.threadsPerChain = 3;
+auto fit = model.sample(JsonFile("data.json"), options);
+```
+
+This runs four chains, two at a time, with up to three Stan threads per active chain. The default is one thread per chain. For an existing thread-enabled executable, pass the same sampling options to `runSample`. An executable built without thread support rejects requests above one and the sampler reports the child error.
+
 ### Models with Stan includes
 
 If `models/survey.stan` contains `#include helpers/centered.stan`, put the helper at `models/helpers/centered.stan` and call `stan.compile("models/survey.stan")` as usual. For shared libraries, add directories in the order you want them searched:

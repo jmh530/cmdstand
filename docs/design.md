@@ -12,9 +12,13 @@ When requested, pedantic warnings are enabled during Stan-to-C++ translation. A 
 
 Persistent caching needs the resolved transitive include graph, effective options, installation and compiler identity, platform, and build-local settings. An executable timestamp alone cannot capture these inputs. Explicit model-handle reuse avoids this ambiguity.
 
+`CompileOptions.enableThreads` requests `STAN_THREADS=true` on the Make command line. Its default leaves installation settings in effect. CmdStan 2.39.0 and 2.40.0 distinguish the threaded main object and precompiled model header by filename. The model itself builds in a fresh directory for each call.
+
 ## Chain and file ownership
 
 A fresh directory per run and per-chain working directories isolate auxiliary outputs. Each child receives an argv vector, numeric chain ID, and shared seed. Log files avoid pipe backpressure. Cancellation stops and reaps direct model children. Compiler process-tree cancellation is future work. A failed run is retained, and the exception includes its location. Callers own existing input files and retained outputs.
+
+`parallelChains` limits the number of simultaneous chain processes. Each child receives its own `STAN_NUM_THREADS` value from `threadsPerChain`, which defaults to one. For a larger count the runner also passes `num_threads` explicitly so an executable built without thread support reports an argument error. Thread counts are positive and fit in a CmdStan integer. The parent environment is unchanged.
 
 The file-oriented sampler resolves all caller-owned initialization files before launching any chain. One file is shared, and an array is checked against the requested chain count and indexed by launch order. The model API also accepts named D values, which it serializes once per shared value or once per chain into the run directory. An explicit initialization and zero initialization are mutually exclusive.
 

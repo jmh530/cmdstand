@@ -41,6 +41,66 @@ private void checkPedanticWarnings(CmdStan stan, string directory)
     }
 }
 
+private void checkWithinChainThreads(CmdStan stan, string root)
+{
+    import std.exception : collectException;
+    import std.math : isClose;
+    auto source = buildPath(root, "threaded_sum.stan");
+    std.file.write(source, `functions {
+        real partial_sum(array[] int chunk, int start, int end, real scale) {
+            return sum(chunk) * scale;
+        }
+    }
+    data { array[8] int weights; }
+    parameters { real x; }
+    model { target += -0.5 * reduce_sum(partial_sum, weights, 1, square(x)); }
+    generated quantities { real total = reduce_sum(partial_sum, weights, 1, 1.0); }`);
+    auto data = JsonFile(buildPath(root, "thread weights.json"));
+    std.file.write(data.path, `{"weights":[1,2,3,4,5,6,7,8]}`);
+    SampleOptions options;
+    options.threadsPerChain = 2;
+    options.seed = 77;
+    options.warmup = 30;
+    options.samples = 4;
+    options.zeroInit = true;
+
+    CompileOptions build;
+    build.enableThreads = true;
+    auto threaded = stan.compile(source, build);
+    scope (exit) threaded.close();
+    CompiledModel ordinary;
+    {
+        // Override only threading; preserve Make's options and variable assignments.
+        auto hadFlags = "MAKEFLAGS" in environment;
+        auto flags = environment.get("MAKEFLAGS", "");
+        scope (exit)
+        {
+            if (hadFlags) environment["MAKEFLAGS"] = flags;
+            else environment.remove("MAKEFLAGS");
+        }
+        environment["MAKEFLAGS"] = flags ~ " STAN_THREADS=";
+        ordinary = stan.compile(source);
+    }
+    scope (exit) ordinary.close();
+    auto failure = collectException!SamplingException(runSample(ordinary.executable, data, root, options));
+    assert(failure !is null && failure.msg.canFind("num_threads"), "Expected an unthreaded model to reject two threads");
+
+    auto fit = threaded.sample(data, options);
+    auto csv = buildPath(root, "direct threaded.csv");
+    auto direct = execute([threaded.executable, "sample", "num_samples=4", "num_warmup=30",
+        "init=0", "random", "seed=77", "num_threads=2", "data", "file=" ~ data.path,
+        "output", "file=" ~ csv, "sig_figs=17"], ["STAN_NUM_THREADS": "2"], Config.none, size_t.max, root);
+    enforce(direct.status == 0, direct.output);
+    auto reference = readSampleCsv(csv);
+    foreach (chain; [fit.chain(0), reference])
+    {
+        assert(chain.comments.canFind("num_threads = 2") || chain.comments.canFind("num_threads = 2 (Default)"));
+        assert(chain.column("total") == [36, 36, 36, 36]);
+        foreach (i, x; chain.column("x"))
+            assert(isClose(chain.column("lp__")[i], -18 * x * x));
+    }
+}
+
 private void checkSummary(CmdStan stan, string[] paths, string directory)
 {
     import std.exception : assertThrown;
@@ -190,6 +250,7 @@ void main(string[] args)
     copy(args[1], source);
     auto stan = CmdStan.discover();
     checkDiagnose(stan, root);
+    checkWithinChainThreads(stan, root);
     checkPedanticWarnings(stan, root);
     auto broken = buildPath(root, "broken.stan");
     std.file.write(broken, "parameters { this is invalid Stan; }");
