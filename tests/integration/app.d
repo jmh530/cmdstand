@@ -41,6 +41,42 @@ private void checkPedanticWarnings(CmdStan stan, string directory)
     }
 }
 
+private void checkSummary(CmdStan stan, string[] paths, string directory)
+{
+    import std.exception : assertThrown;
+    import std.math : isClose, isNaN;
+    auto table = stan.summary(paths);
+    double total = 0;
+    size_t count;
+    foreach (path; paths)
+        foreach (theta; readSampleCsv(path).column("theta"))
+        {
+            total += theta;
+            ++count;
+        }
+    assert(isClose(table["theta", "Mean"], total / count));
+
+    version (Windows) enum tool = "stansummary.exe";
+    else enum tool = "stansummary";
+    auto csv = buildPath(directory, "direct summary.csv");
+    auto direct = execute([buildPath(stan.path, "bin", tool), "--sig_figs=17",
+        "--csv_filename=" ~ csv] ~ paths);
+    enforce(direct.status == 0, direct.output);
+    auto expected = readSummaryCsv(csv);
+    assert(table.rowNames == expected.rowNames && table.columnNames == expected.columnNames);
+    foreach (row; expected.rowNames)
+        foreach (column; expected.columnNames)
+        {
+            auto value = expected[row, column];
+            assert(value.isNaN ? table[row, column].isNaN : table[row, column] == value);
+        }
+    assertThrown!SummaryException(stan.summary());
+    assertThrown!SummaryException(stan.summary(buildPath(directory, "missing.csv")));
+    auto invalid = buildPath(directory, "invalid chain.csv");
+    std.file.write(invalid, "not a sampling CSV\n");
+    assertThrown!SummaryException(stan.summary(invalid));
+}
+
 private void checkImportedChainIds(CompiledModel model, JsonFile data, string root)
 {
     import std.exception : assertThrown;
@@ -256,6 +292,7 @@ void main(string[] args)
                 assert(warmA.series(g, r, c).length == 0);
             }
     auto files = runSample(model.executable, input, root, o);
+    checkSummary(stan, [files.chains[0].csv, files.chains[1].csv], root);
     auto reopened = readSampleFit(files.chains[1].csv, files.chains[0].csv);
     assert(reopened.chainCount == 2 && reopened.seed == o.seed);
     assert(fit.chainCount == 2 && fit.seed == o.seed);

@@ -2,6 +2,7 @@
 module cmdstan.installation;
 
 import cmdstan.internal.workspace;
+import cmdstan.csv : SummaryTable, readSummaryCsv;
 import cmdstan.model : CompiledModel;
 import cmdstan.sampling : tail;
 import std.algorithm : canFind, startsWith, endsWith;
@@ -10,7 +11,7 @@ import std.conv : to;
 import std.exception : basicExceptionCtors, enforce;
 import std.file;
 import std.path : absolutePath, baseName, buildPath, dirName, expandTilde, extension;
-import std.process : Config, environment, spawnProcess, wait;
+import std.process : Config, ProcessException, environment, spawnProcess, wait;
 import std.stdio : File, stdin;
 import std.string : splitLines, strip;
 
@@ -18,6 +19,7 @@ version (Windows) private enum suffix = ".exe";
 else private enum suffix = "";
 
 class InstallationException : Exception { mixin basicExceptionCtors; }
+class SummaryException : Exception { mixin basicExceptionCtors; }
 class CompilationException : Exception
 {
     /// Owned staging directory retained after a build attempt.
@@ -174,6 +176,45 @@ struct CmdStan
             error.directory = directory;
             throw error;
         }
+    }
+
+    /++ Params:
+            csvPaths = One or more caller-owned CmdStan chain CSV files from one fit.
+        Returns: The installed stansummary tool's default statistics across the
+            supplied chains, with numeric output requested at 17 significant digits.
+            Temporary summary and log files are removed before returning.
+        Throws: SummaryException for missing inputs or a tool failure, CsvException
+            for malformed summary output, or an I/O exception for filesystem errors.
+    +/
+    SummaryTable summary(const(string)[] csvPaths...) const
+    {
+        enforce!SummaryException(root.length && csvPaths.length,
+            "Expected a CmdStan installation and at least one chain CSV");
+        auto program = buildPath(root, "bin", "stansummary" ~ suffix);
+        enforce!SummaryException(exists(program) && isFile(program), "Missing stansummary: " ~ program);
+        string[] inputs;
+        foreach (path; csvPaths)
+        {
+            enforce!SummaryException(path.length && exists(path) && isFile(path), "Missing chain CSV: " ~ path);
+            inputs ~= absolutePath(path);
+        }
+        auto directory = newDirectory(null, "cmdstand-summary-");
+        scope (exit) removeArtifactDirectory(directory);
+        auto csv = buildPath(directory, "summary.csv");
+        auto log = buildPath(directory, "summary.log");
+        int status;
+        try
+        {
+            auto output = File(log, "wb");
+            status = wait(spawnProcess([program, "--csv_filename=" ~ csv, "--sig_figs=17"] ~ inputs,
+                stdin, output, output));
+        }
+        catch (ProcessException e)
+        {
+            throw new SummaryException(program ~ ": " ~ e.msg);
+        }
+        enforce!SummaryException(status == 0, "stansummary exited with code " ~ status.to!string ~ "\n" ~ tail(log));
+        return readSummaryCsv(csv);
     }
 
     private static CmdStan findRelease(string parent)

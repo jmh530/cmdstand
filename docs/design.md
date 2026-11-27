@@ -26,6 +26,12 @@ The header establishes indexed extents for dense numeric outputs of any rank. Th
 
 The optional DUB subpackage `cmdstand:mir` exposes a runtime-rank indexing handle through `DrawView.asSlice`. The first bracket expression supplies one integer or half-open range per input axis. The number of ranges determines the compile-time rank of the native Mir result, a `Slice!(const(double)*, N, Universal)`. All-integer selection returns a scalar. The adapter checks dimensions, bounds and strides against the buffer, and shares the GC-owned numeric storage. The resulting slice supports Mir iteration and random access.
 
+## Posterior summaries
+
+`CmdStan.summary` passes chain CSV paths to the selected installation's `bin/stansummary`. CmdStan computes the statistics and writes its machine-readable CSV at 17 significant digits. Each invocation owns a temporary directory for the output and process log. The caller owns the chain files. The returned table owns its data, so callers can query it after removing those files. A transient fit must be sampled with output retention enabled if its chain CSVs will be needed later.
+
+`readSummaryCsv` is independently usable. It preserves upstream row and statistic labels, including bracketed parameter indices and percentile columns. Undefined diagnostics retain their upstream floating-point values. The parser shares the sampling reader's locale-independent numeric conversion.
+
 ## Upstream evidence
 
 - [CmdStan 2.40.0 build rules](https://github.com/stan-dev/cmdstan/blob/v2.40.0/make/program) and [upstream multi-chain tests](https://github.com/stan-dev/cmdstan/blob/v2.40.0/src/test/interface/multi_chain_test.cpp) define the actual process contract. Inspected 2.39.0, 2.40.0 and development revision 11c2e3d1.

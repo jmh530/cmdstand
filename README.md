@@ -172,6 +172,21 @@ scope (exit) model.close();
 
 The model's directory is searched first for every include, including nested ones. Relative entries in `includePaths` resolve from the calling program's working directory. Spaces are supported. An additional directory's absolute path must fit in stanc's comma-separated list, so it cannot contain a comma. For a model with includes, runtime line numbers refer to the expanded `.stan` file alongside `model.executable`.
 
+### Summarize saved chains
+
+Pass the chain CSVs from a single fit to the selected installation. The resulting table includes one row per parameter element and retains the tool's statistic labels.
+
+```d
+import cmdstan;
+
+auto stan = CmdStan.discover();
+auto stats = stan.summary("runs/chain-1/draws.csv", "runs/chain-2/draws.csv");
+double mean = stats["theta", "Mean"];
+double rHat = stats["theta", "R_hat"];
+```
+
+For a run retained with `SampleOptions.outputDir`, use the paths in `fit.artifacts.chains[i].csv`. Inspect `stats.rowNames` and `stats.columnNames` to discover available entries. For a matrix element, use the upstream label, for example `stats["A[1,2]", "Mean"]`. If you already have a summary CSV from `stansummary`, open it with `readSummaryCsv(path)` without a CmdStan installation.
+
 ## Development
 
 - `dub test` runs fixture, discovery, and data tests.
