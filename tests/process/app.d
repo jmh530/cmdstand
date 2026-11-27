@@ -123,6 +123,13 @@ int main(string[] args)
     o.chains = 3;
     o.parallelChains = 2;
     o.seed = 123;
+    foreach (invalid; [0u, cast(uint) int.max + 1])
+    {
+        import std.exception : assertThrown;
+        o.threadsPerChain = invalid;
+        assertThrown!SamplingException(runSample(thisExePath(), input, root, o));
+    }
+    o.threadsPerChain = 2;
     write(input.path, "success");
     auto run = runSample(thisExePath(), input, root, o);
     assert(environment["STAN_NUM_THREADS"] == "3");
@@ -161,20 +168,22 @@ int main(string[] args)
 
 private int fakeChild(string[] args)
 {
-    string input, output, id, initial;
+    string input, output, id, initial, threads = "1";
     foreach (i, arg; args)
     {
         if (arg == "data") input = args[i + 1]["file=".length .. $];
         if (arg == "output") output = args[i + 1]["file=".length .. $];
         if (arg.startsWith("id=")) id = arg[3 .. $];
         if (arg.startsWith("init=")) initial = arg[5 .. $];
+        if (arg.startsWith("num_threads=")) threads = arg["num_threads=".length .. $];
     }
     enforce(baseName(getcwd()) == "chain-" ~ id);
     // getcwd can resolve a symlink in the supplied output directory.
     write("ready", "");
     enforce(exists(buildPath(dirName(output), "ready")));
-    enforce(environment["STAN_NUM_THREADS"] == "1");
     auto scenario = readText(input);
+    enforce(threads == (scenario == "inspect init" ? "1" : "2"));
+    enforce(environment["STAN_NUM_THREADS"] == threads);
     if (scenario == "inspect init")
     {
         write(output, readText(initial));
