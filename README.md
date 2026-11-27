@@ -26,6 +26,20 @@ auto warmup = chain.warmupVariable("m");
 
 `data` exposes the flat read-only slice for just this variable and phase. The view keeps that storage alive. Look up a view once before looping over its elements.
 
+### Reopen saved sampling chains
+
+Pass the chain CSVs from a run to `readSampleFit` in the order you want to analyze them. It returns the same `SampleFit` as `model.sample` and works without a CmdStan installation.
+
+```d
+import cmdstan.sampling : readSampleFit;
+
+auto fit = readSampleFit("chain-1/draws.csv", "chain-2/draws.csv");
+auto theta = fit.chain(1).column("theta");  // Second file supplied
+auto warmup = fit.chain(1).warmupColumn("theta");
+```
+
+You can also pass an array of paths. For multiple files the reader checks distinct recorded chain IDs (including zero), the model name, column names and order, sampler algorithm and engine, iteration counts, thinning, and warmup retention. For native multi-chain runs, CmdStan records the starting ID in every header. Keep the original output filenames so the importer can identify each chain, even when you pass a subset or change the order. Choose files from the same analysis: two runs on different data can have identical headers. The fit owns its draws and leaves the CSVs in place. Its `seed` is the common recorded seed, or zero when seeds differ or are missing.
+
 ### Analyze and plot a chain
 
 The [draw traces example](examples/draws/app.d) follows a scalar parameter through a chain and computes a second trace by taking the determinant of a 2×2 matrix at each saved draw. From the repository root, run:

@@ -48,6 +48,14 @@ struct DrawView
     }
 }
 
+// Configuration fields that identify compatible draw layouts across chains.
+package(cmdstan) struct SampleLayout
+{
+    string model, algorithm, engine;
+    size_t samples, warmup, thin;
+    bool saveWarmup;
+}
+
 /// Owned draws for one chain. Phase buffers store each column contiguously.
 struct ChainDraws
 {
@@ -56,13 +64,19 @@ struct ChainDraws
     private double[] posterior, warmup;
     private string[] annotations;
     private size_t savedSamples, savedWarmup;
-    private uint id;
+    package(cmdstan) uint id;
+    package(cmdstan) bool hasRecordedId;
+    package(cmdstan) uint nativeChainCount = 1;
+    package(cmdstan) string outputFile;
+    package(cmdstan) SampleLayout layout;
+    package(cmdstan) string recordedSeed;
 
     /// Returns: Original scalar column labels, in file order.
     @property const(string)[] columnNames() const @safe pure nothrow { return names; }
     /// Returns: Configuration, adaptation, and timing comments, in file order.
     @property const(string)[] comments() const @safe pure nothrow { return annotations; }
-    /// Returns: CmdStan chain ID recorded in the file, or zero if absent.
+    /// Returns: Recorded ID (zero if absent), or the individual chain ID
+    /// resolved by readSampleFit for a native multi-chain run.
     @property uint chainId() const @safe pure nothrow { return id; }
     /// Returns: Number of sampling iterations saved after thinning.
     @property size_t sampleCount() const @safe pure nothrow { return savedSamples; }
@@ -323,6 +337,7 @@ private ChainDraws readChain(File input, string path, ulong bytes)
     ChainDraws chain;
     size_t lineNumber, row;
     string[string] settings;
+    bool inOutput;
 
     void check(bool condition, lazy string detail)
     {
@@ -348,11 +363,17 @@ private ChainDraws readChain(File input, string path, ulong bytes)
             chain.annotations ~= comment;
             if (chain.names.length) continue;
             auto eq = comment.indexOf('=');
-            if (eq < 0) continue;
+            if (eq < 0)
+            {
+                inOutput = comment == "output";
+                continue;
+            }
             auto value = comment[eq + 1 .. $].strip;
             if (value.endsWith("(Default)"))
                 value = value[0 .. $ - "(Default)".length].strip;
-            settings[comment[0 .. eq].strip] = value;
+            auto key = comment[0 .. eq].strip;
+            if (inOutput && key == "file") chain.outputFile = value;
+            settings[key] = value;
             continue;
         }
         if (!chain.names.length)
@@ -361,18 +382,29 @@ private ChainDraws readChain(File input, string path, ulong bytes)
             size_t thin = number("thin");
             check(thin > 0, "thin must be positive");
             size_t thinned(size_t count) { return count / thin + (count % thin != 0); }
-            chain.savedSamples = thinned(number("num_samples"));
+            auto samples = number("num_samples");
+            chain.savedSamples = thinned(samples);
             auto save = settings.get("save_warmup", "");
             check(save == "0" || save == "1" || save == "false" || save == "true",
                   "invalid save_warmup");
             auto warm = number("num_warmup");
-            if ((save == "1" || save == "true") && settings.get("algorithm", "") != "fixed_param")
+            chain.layout = SampleLayout(settings.get("model", ""), settings.get("algorithm", ""),
+                settings.get("engine", ""), samples, warm, thin, save == "1" || save == "true");
+            chain.recordedSeed = settings.get("seed", "");
+            if ("num_chains" in settings)
+            {
+                auto count = number("num_chains");
+                check(count > 0 && count <= uint.max, "invalid num_chains");
+                chain.nativeChainCount = cast(uint) count;
+            }
+            if (chain.layout.saveWarmup && chain.layout.algorithm != "fixed_param")
                 chain.savedWarmup = thinned(warm);
             if ("id" in settings)
             {
                 auto id = number("id");
                 check(id <= uint.max, "invalid chain id");
                 chain.id = cast(uint) id;
+                chain.hasRecordedId = true;
             }
             chain.names = line.idup.split(",");
             foreach (index, ref name; chain.names)

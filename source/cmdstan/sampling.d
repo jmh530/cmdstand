@@ -274,19 +274,182 @@ package string tail(string path)
 struct SampleFit
 {
     private ChainDraws[] draws;
+    /// Common seed. Zero also denotes missing or differing seeds in an imported fit.
     uint seed;
-    /// Retained run metadata. Empty directory means temporary files were removed.
+    /// Retained run metadata, empty for a transient run or an imported fit.
     SampleRun artifacts;
 
     /// Returns: Number of validated chains.
     @property size_t chainCount() const @safe pure nothrow { return draws.length; }
 
     /++ Params:
-            index = Zero-based index in requested chain order.
+            index = Zero-based index in launch order or, for imports, input file order.
         Returns: Owned chain descriptor sharing the fit's numerical storage.
         Throws: RangeError if index is out of bounds.
     +/
     const(ChainDraws) chain(size_t index) const @safe { return draws[index]; }
+
+    private void append(ChainDraws chain, string path)
+    {
+        enforce!SamplingException(!draws.length || draws[0].columnNames == chain.columnNames,
+                                  "Inconsistent column schema in " ~ path);
+        draws ~= chain;
+    }
+}
+
+/++ Params:
+        csvPaths = One or more caller-owned sampling CSV paths in the desired
+            chain order. For multiple files, model names must be present and
+            individual chain IDs (including zero) must be present and distinct.
+            Native multi-chain files must be identifiable by their output names.
+    Returns: An in-memory fit owning the decoded sampling and warmup draws.
+        A common recorded seed is exposed through seed, otherwise seed is zero.
+        No process artifacts are created. The files can be closed or removed
+        by their owner after import.
+    Throws: SamplingException for empty input, invalid seed metadata, or
+        incompatible chains. CsvException or an I/O exception for invalid
+        or unreadable sampling CSVs.
++/
+SampleFit readSampleFit(const(string)[] csvPaths...)
+{
+    import std.conv : ConvException;
+    enforce!SamplingException(csvPaths.length, "Expected at least one sampling CSV");
+    SampleFit fit;
+    bool[uint] seen;
+    foreach (path; csvPaths)
+    {
+        auto chain = readSampleCsv(path);
+        if (chain.nativeChainCount > 1) chain.id = nativeChainId(chain, path);
+        if (csvPaths.length > 1)
+        {
+            enforce!SamplingException(chain.layout.model.length, "Missing model name in " ~ path);
+            enforce!SamplingException(chain.hasRecordedId && chain.chainId !in seen,
+                                      "Missing or duplicate chain ID in " ~ path);
+            seen[chain.chainId] = true;
+            enforce!SamplingException(!fit.draws.length || chain.layout == fit.draws[0].layout,
+                                      "Incompatible model or sampling configuration in " ~ path);
+        }
+        uint seed;
+        if (chain.recordedSeed.length)
+        {
+            try { seed = chain.recordedSeed.to!uint; }
+            catch (ConvException e) { throw new SamplingException("Invalid seed in " ~ path); }
+        }
+        if (!fit.draws.length) fit.seed = seed;
+        else if (fit.seed != seed) fit.seed = 0;
+        fit.append(chain, path);
+    }
+    return fit;
+}
+
+///
+unittest
+{
+    auto fit = readSampleFit("tests/fixtures/matrix.csv");
+    assert(fit.chainCount == 1 && fit.chain(0).chainId == 7);
+    assert(fit.chain(0).variable("m").series(1, 2) == [23, 123]);
+}
+
+unittest
+{
+    import cmdstan.csv : CsvException;
+    import std.exception : assertThrown;
+    import std.file : readText, remove, write;
+    import std.string : replace;
+    auto directory = newDirectory(null, "saved-fit-");
+    scope (exit) rmdirRecurse(directory);
+    auto a = buildPath(directory, "a.csv");
+    auto b = buildPath(directory, "b.csv");
+    auto fixture = "# model = matrix_model\n# seed = 12\n" ~ readText("tests/fixtures/matrix.csv");
+    write(a, fixture);
+    auto second = fixture.replace("id = 7", "id = 2");
+    write(b, second);
+    const paths = [b, a];
+    auto fit = readSampleFit(paths);
+    assert(fit.chainCount == 2 && fit.chain(0).chainId == 2 && fit.chain(1).chainId == 7);
+    assert(fit.seed == 12 && !fit.artifacts.directory.length);
+    assertThrown!SamplingException(readSampleFit());
+    assertThrown!SamplingException(readSampleFit(a, a));
+    write(b, second.replace("id = 2", "id = 0"));
+    assert(readSampleFit(b, a).chain(0).chainId == 0);
+    assertThrown!SamplingException(readSampleFit(b, b));
+    auto native = "# num_chains = 2\n# output\n# file = a.csv,b.csv\n" ~ fixture;
+    write(a, native);
+    write(b, native);
+    assert(readSampleFit(b, a).chain(0).chainId == 8);
+    assert(readSampleFit(a).chain(0).chainId == 7);
+    assertThrown!SamplingException(readSampleFit(b, b));
+    write(b, native.replace("a.csv,b.csv", "numbered.csv"));
+    assertThrown!SamplingException(readSampleFit(b));
+    write(a, fixture);
+    foreach (bad; [second.replace("model = matrix_model", "model = other"),
+                   second.replace("# model = matrix_model\n", ""),
+                   second.replace("# id = 2\n", ""), second.replace("num_samples = 3", "num_samples = 4"),
+                   second.replace("lp__", "other"), second.replace("seed = 12", "seed = invalid")])
+    {
+        write(b, bad);
+        assertThrown!SamplingException(readSampleFit(a, b));
+    }
+    foreach (other; [second.replace("seed = 12", "seed = 13"), second.replace("# seed = 12\n", "")])
+    {
+        write(b, other);
+        assert(readSampleFit(a, b).seed == 0);
+    }
+    write(b, second ~ "0,1,2,3,4,5,6\n");
+    assertThrown!CsvException(readSampleFit(a, b));
+    remove(a);
+    remove(b);
+    assert(fit.chain(0).warmupVariable("m").series(1, 2) == [-23]);
+}
+
+// Native CmdStan writes the starting ID and output specification into every
+// header. Resolve the file's position independently of the caller's ordering.
+private uint nativeChainId(ref const ChainDraws chain, string path)
+{
+    import std.algorithm : endsWith, startsWith;
+    import std.conv : ConvException;
+    import std.path : absolutePath, baseName, extension, stripExtension;
+    import std.string : indexOf, replace, split;
+    auto name = baseName(path);
+    auto output = chain.outputFile.replace("\\", "/");
+    auto start = chain.chainId;
+    auto count = chain.nativeChainCount;
+    auto invalid = "Cannot determine native chain ID for " ~ path;
+    enforce!SamplingException(chain.hasRecordedId && output.length && count - 1 <= uint.max - start, invalid);
+
+    if (output.indexOf(',') >= 0)
+    {
+        auto names = output.split(",");
+        enforce!SamplingException(names.length == count, invalid);
+        auto actual = absolutePath(path).replace("\\", "/");
+        size_t match, matches, best;
+        foreach (i, recorded; names)
+        {
+            if (!extension(recorded).length) recorded ~= ".csv";
+            if (baseName(recorded) != name) continue;
+            // A full path distinguishes identically named files in separate
+            // directories. A unique basename still works after relocation.
+            size_t score = 1;
+            if (actual == recorded) score = 3;
+            else if (actual.endsWith("/" ~ recorded)) score = 2;
+            if (score > best) { best = score; matches = 0; }
+            if (score == best) { match = i; ++matches; }
+        }
+        enforce!SamplingException(matches == 1, invalid);
+        return start + cast(uint) match;
+    }
+
+    auto prefix = stripExtension(baseName(output)) ~ "_";
+    auto suffix = extension(baseName(output));
+    if (!suffix.length) suffix = ".csv";
+    enforce!SamplingException(name.startsWith(prefix) && name.endsWith(suffix)
+                              && name.length > prefix.length + suffix.length, invalid);
+    auto digits = name[prefix.length .. $ - suffix.length];
+    uint id;
+    try { id = digits.to!uint; }
+    catch (ConvException e) { throw new SamplingException(invalid); }
+    enforce!SamplingException(id >= start && id - start < count && digits == id.to!string, invalid);
+    return id;
 }
 
 package SampleFit sampleData(T, I)(string exe, auto ref const T data, SampleOptions o,
@@ -317,9 +480,7 @@ package SampleFit sampleData(T, I)(string exe, auto ref const T data, SampleOpti
             draws.sampleCount == 1 + (o.samples - 1) / o.thin &&
             draws.warmupCount == (o.saveWarmup && o.warmup ? 1 + (o.warmup - 1) / o.thin : 0),
             "Unexpected chain ID or draw counts in " ~ c.csv);
-        enforce!SamplingException(!fit.draws.length || fit.draws[0].columnNames == draws.columnNames,
-                                  "Inconsistent column schema in " ~ c.csv);
-        fit.draws ~= draws;
+        fit.append(draws, c.csv);
     }
     fit.seed = run.seed;
     if (o.outputDir.length) fit.artifacts = run;
