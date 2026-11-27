@@ -1,4 +1,4 @@
-/// Read one CmdStan sampling CSV independently of a CmdStan installation.
+/// Read CmdStan sampling and summary CSV files independently of an installation.
 module cmdstan.csv;
 
 import std.algorithm : splitter, startsWith, endsWith;
@@ -514,4 +514,119 @@ else version (Posix)
     private extern(C) double strtod_l(const(char)*, char**, NumericLocale);
     private alias parseDecimal = strtod_l;
     private NumericLocale numericLocale() { return newlocale(LC_NUMERIC_MASK, "C", null); }
+}
+
+/// Numeric stansummary output in upstream row and column order.
+struct SummaryTable
+{
+    private string[] rows, columns;
+    private size_t[string] rowIndex, columnIndex;
+    private double[] values;
+
+    /// Returns: Parameter elements and sampler fields in output order.
+    @property const(string)[] rowNames() const { return rows; }
+    /// Returns: Statistic labels, including percentile labels, in output order.
+    @property const(string)[] columnNames() const { return columns; }
+
+    /++ Params:
+            name = Exact stansummary row name, such as theta or A[1,2].
+            statistic = Case-sensitive column label, such as Mean or R_hat.
+        Returns: The reported value, including any upstream NaN or infinity.
+        Throws: CsvException if either label is absent.
+    +/
+    double opIndex(string name, string statistic) const
+    {
+        auto r = name in rowIndex;
+        auto c = statistic in columnIndex;
+        enforce!CsvException(r, "Unknown summary row: " ~ name);
+        enforce!CsvException(c, "Unknown summary statistic: " ~ statistic);
+        return values[*r * columns.length + *c];
+    }
+}
+
+/++ Params:
+        path = Path to the CSV written by CmdStan's stansummary tool.
+    Returns: An in-memory table independent of the file. Comment lines are skipped.
+    Throws: CsvException for malformed tables, or an I/O exception on read failure.
++/
+SummaryTable readSummaryCsv(string path)
+{
+    import std.csv : csvReader;
+    import std.array : array;
+
+    SummaryTable result;
+    auto locale = numericLocale();
+    enforce!CsvException(locale !is null, "Cannot create numeric locale");
+    scope (exit) freeLocale(locale);
+    size_t number;
+    foreach (line; File(path).byLineCopy())
+    {
+        ++number;
+        auto record = line.strip;
+        enforce!CsvException(record.indexOf('\r') < 0,
+            path ~ "(" ~ number.to!string ~ "): unexpected carriage return");
+        if (!record.length || record[0] == '#') continue;
+        try
+        {
+            auto fields = csvReader!string(record).front.array;
+            if (!result.columns.length)
+            {
+                enforce(fields.length > 1 && fields[0] == "name", "expected summary header");
+                result.columns = fields[1 .. $];
+                foreach (i, label; result.columns)
+                {
+                    enforce(label.length && label !in result.columnIndex, "empty or duplicate statistic");
+                    result.columnIndex[label] = i;
+                }
+                continue;
+            }
+            enforce(fields.length == result.columns.length + 1, "unexpected number of fields");
+            auto name = fields[0];
+            enforce(name.length && name !in result.rowIndex, "empty or duplicate row name");
+            result.rowIndex[name] = result.rows.length;
+            result.rows ~= name;
+            foreach (field; fields[1 .. $]) result.values ~= parseCell(field.strip, locale);
+        }
+        catch (Exception e)
+        {
+            throw new CsvException(path ~ "(" ~ number.to!string ~ "): " ~ e.msg);
+        }
+    }
+    enforce!CsvException(result.rows.length, path ~ ": empty summary table");
+    return result;
+}
+
+unittest
+{
+    import cmdstan.internal.workspace : newDirectory, removeArtifactDirectory;
+    import std.exception : assertThrown;
+    import std.file : write;
+    import std.math : isNaN;
+    import std.path : buildPath;
+    auto root = newDirectory(null, "summary-test-");
+    scope (exit) removeArtifactDirectory(root);
+    auto path = buildPath(root, "summary.csv");
+    // Hand-authored to exercise quoted matrix indices and non-finite statistics.
+    write(path, "name,Mean,5%,R_hat\r\n\"A[1,2]\",1.25,-inf,nan\r\n# timing, data\r\n");
+    auto t = readSummaryCsv(path);
+    assert(t.rowNames == ["A[1,2]"] && t.columnNames == ["Mean", "5%", "R_hat"]);
+    assert(t["A[1,2]", "Mean"] == 1.25 && t["A[1,2]", "5%"] == -double.infinity);
+    assert(t["A[1,2]", "R_hat"].isNaN);
+    assertThrown!CsvException(t["x", "Mean"]);
+    assertThrown!CsvException(t["A[1,2]", "missing"]);
+    foreach (bad; ["", "name,Mean\n", "bad,Mean\nx,1", "name,M,M\nx,1,2",
+                   "name,M\nx,1\nx,2", "name,M\nx", "name,M\nx,1,2", "name,M\nx,3x",
+                   "name,Mean\ntheta,1\rbeta,2\n", "name,Mean\ntheta,1\n# comment\rbeta,2\n"])
+    {
+        write(path, bad);
+        assertThrown!CsvException(readSummaryCsv(path));
+    }
+}
+
+unittest
+{
+    auto table = readSummaryCsv("tests/fixtures/bernoulli-summary-2.40.0.csv");
+    assert(table["theta", "R_hat"] == 0.99533925665013223);
+    assert(table["theta", "ESS_bulk"] == 14.683073348973082);
+    assert(table["theta", "ESS_tail"] == 8);
 }

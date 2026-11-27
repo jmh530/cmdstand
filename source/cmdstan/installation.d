@@ -2,6 +2,7 @@
 module cmdstan.installation;
 
 import cmdstan.internal.workspace;
+import cmdstan.csv : SummaryTable, readSummaryCsv;
 import cmdstan.model : CompiledModel;
 import cmdstan.sampling : tail;
 import std.algorithm : canFind, startsWith, endsWith;
@@ -10,7 +11,7 @@ import std.conv : to;
 import std.exception : basicExceptionCtors, enforce;
 import std.file;
 import std.path : absolutePath, baseName, buildPath, dirName, expandTilde, extension;
-import std.process : Config, environment, spawnProcess, wait;
+import std.process : Config, ProcessException, environment, spawnProcess, wait;
 import std.stdio : File, stdin;
 import std.string : splitLines, strip;
 
@@ -18,6 +19,7 @@ version (Windows) private enum suffix = ".exe";
 else private enum suffix = "";
 
 class InstallationException : Exception { mixin basicExceptionCtors; }
+class SummaryException : Exception { mixin basicExceptionCtors; }
 class CompilationException : Exception
 {
     /// Owned staging directory retained after a build attempt.
@@ -176,6 +178,41 @@ struct CmdStan
         }
     }
 
+    /++ Params:
+            csvPaths = One or more caller-owned CmdStan chain CSV files from one fit.
+        Returns: The installed stansummary tool's default statistics across the
+            supplied chains, with numeric output requested at 17 significant digits.
+            Temporary summary and log files are removed before returning.
+        Throws: SummaryException for missing or repeated input files, incomplete
+            saved warmup, invalid warmup settings, or a tool failure.
+            CsvException for malformed summary output. I/O exceptions for filesystem errors.
+    +/
+    SummaryTable summary(const(string)[] csvPaths...) const
+    {
+        enforce!SummaryException(root.length && csvPaths.length,
+            "Expected a CmdStan installation and at least one chain CSV");
+        auto program = buildPath(root, "bin", "stansummary" ~ suffix);
+        enforce!SummaryException(exists(program) && isFile(program), "Missing stansummary: " ~ program);
+        auto inputs = summaryInputs(csvPaths);
+        auto directory = newDirectory(null, "cmdstand-summary-");
+        scope (exit) removeArtifactDirectory(directory);
+        auto csv = buildPath(directory, "summary.csv");
+        auto log = buildPath(directory, "summary.log");
+        int status;
+        try
+        {
+            auto output = File(log, "wb");
+            status = wait(spawnProcess([program, "--csv_filename=" ~ csv, "--sig_figs=17"] ~ inputs,
+                stdin, output, output));
+        }
+        catch (ProcessException e)
+        {
+            throw new SummaryException(program ~ ": " ~ e.msg);
+        }
+        enforce!SummaryException(status == 0, "stansummary exited with code " ~ status.to!string ~ "\n" ~ tail(log));
+        return readSummaryCsv(csv);
+    }
+
     private static CmdStan findRelease(string parent)
     {
         uint[] best;
@@ -229,6 +266,121 @@ struct CmdStan
         assert(discover().versionString == "2.9.0");
         environment["CMDSTAN"] = buildPath(parent, "missing");
         assertThrown!InstallationException(discover());
+    }
+}
+
+private struct FileIdentity
+{
+    ulong device, index;
+}
+
+private FileIdentity fileIdentity(File file)
+{
+    version (Windows)
+    {
+        import core.sys.windows.winbase : BY_HANDLE_FILE_INFORMATION, GetFileInformationByHandle;
+        import std.windows.syserror : wenforce;
+        BY_HANDLE_FILE_INFORMATION info;
+        wenforce(GetFileInformationByHandle(file.windowsHandle, &info), file.name);
+        return FileIdentity(info.dwVolumeSerialNumber,
+            (cast(ulong) info.nFileIndexHigh << 32) | info.nFileIndexLow);
+    }
+    else version (Posix)
+    {
+        import core.sys.posix.sys.stat : fstat, stat_t;
+        import std.exception : errnoEnforce;
+        stat_t info;
+        errnoEnforce(fstat(file.fileno, &info) == 0, file.name);
+        return FileIdentity(info.st_dev, info.st_ino);
+    }
+}
+
+private string[] summaryInputs(const(string)[] paths)
+{
+    string[] inputs;
+    bool[FileIdentity] seen;
+    foreach (path; paths)
+    {
+        enforce!SummaryException(path.length && exists(path) && isFile(path), "Missing chain CSV: " ~ path);
+        auto file = File(path, "rb");
+        if (paths.length > 1)
+        {
+            auto id = fileIdentity(file);
+            enforce!SummaryException(id !in seen, "Repeated chain CSV: " ~ path);
+            seen[id] = true;
+        }
+        checkWarmupBoundary(file);
+        inputs ~= absolutePath(path);
+    }
+    return inputs;
+}
+
+private void checkWarmupBoundary(File file)
+{
+    import std.conv : ConvException;
+    import std.string : indexOf;
+    bool headerRead, saved, hasWarmup, fixedParam;
+    foreach (line; file.byLine())
+    {
+        // Upstream stops skipping saved warmup at a '#' in column one.
+        if (headerRead)
+        {
+            if (line.startsWith("#")) return;
+            continue;
+        }
+        if (!line.startsWith("#"))
+        {
+            if (!saved || !hasWarmup || fixedParam) return;
+            headerRead = true;
+            continue;
+        }
+        auto eq = line.indexOf('=');
+        if (eq < 0) continue;
+        auto key = line[1 .. eq].strip;
+        auto value = line[eq + 1 .. $].strip;
+        if (value.endsWith(" (Default)")) value = value[0 .. $ - " (Default)".length].strip;
+        switch (key)
+        {
+            case "algorithm": fixedParam = value == "fixed_param"; break;
+            case "save_warmup":
+                enforce!SummaryException(["1", "0", "true", "false"].canFind(value),
+                    file.name ~ ": invalid save_warmup");
+                saved = value == "1" || value == "true";
+                break;
+            case "num_warmup":
+                try { hasWarmup = value.to!ulong != 0; }
+                catch (ConvException) { throw new SummaryException(file.name ~ ": invalid num_warmup"); }
+                break;
+            default: break;
+        }
+    }
+    enforce!SummaryException(!headerRead, file.name ~ ": missing comment after saved warmup");
+}
+
+unittest
+{
+    import std.exception : assertThrown;
+    auto root = newDirectory(null, "summary-inputs-");
+    scope (exit) removeArtifactDirectory(root);
+    auto path = buildPath(root, "chain.csv");
+    enum saved = "# save_warmup = true (Default)\n# num_warmup = 10\n";
+    write(path, saved ~ "lp__,x\n1,2\n  # not a boundary\n");
+    assertThrown!SummaryException(summaryInputs([path]));
+    write(path, saved ~ "lp__,x\n1,2\n# Adaptation terminated\n1,3\n");
+    assert(summaryInputs([path]) == [path]);
+    assertThrown!SummaryException(summaryInputs([path, path]));
+    enum fixture = "tests/fixtures/bernoulli-2.39.0.csv";
+    assertThrown!SummaryException(summaryInputs([fixture, absolutePath(fixture)]));
+    version (Posix)
+    {
+        auto aliasPath = buildPath(root, "alias.csv");
+        symlink(path, aliasPath);
+        assertThrown!SummaryException(summaryInputs([path, aliasPath]));
+    }
+    foreach (setting; ["# num_warmup = 0\n", "# save_warmup = 0\n", "# algorithm = fixed_param\n"])
+    {
+        write(path, saved ~ setting ~ "lp__,x\n1,2\n");
+        assert(summaryInputs([path]) == [path]);
     }
 }
 
