@@ -32,6 +32,8 @@ The optional DUB subpackage `cmdstand:mir` exposes a runtime-rank indexing handl
 
 `readSummaryCsv` is independently usable. It preserves upstream row and statistic labels, including bracketed parameter indices and percentile columns. Undefined diagnostics retain their upstream floating-point values. The parser shares the sampling reader's locale-independent numeric conversion.
 
+Before launching the tool on multiple chains, CmdStanD checks the identity of each file so aliases of the same file cannot count twice. For chains with saved warmup, it streams through the warmup rows to check for the comment where the upstream reader resumes. This prevents an interrupted file from leaving the tool waiting at end of file.
+
 ## Upstream evidence
 
 - [CmdStan 2.40.0 build rules](https://github.com/stan-dev/cmdstan/blob/v2.40.0/make/program) and [upstream multi-chain tests](https://github.com/stan-dev/cmdstan/blob/v2.40.0/src/test/interface/multi_chain_test.cpp) define the actual process contract. Inspected 2.39.0, 2.40.0 and development revision 11c2e3d1.
@@ -41,3 +43,5 @@ The optional DUB subpackage `cmdstand:mir` exposes a runtime-rank indexing handl
 - [Stan JSON](https://mc-stan.org/docs/cmdstan-guide/json_apdx.html) and [CSV](https://mc-stan.org/docs/cmdstan-guide/stan_csv_apdx.html) specify different multidimensional orders. The checked-in matrix fixture is hand-authored with distinguishable coordinates.
 
 The Bernoulli CSV fixture is chain 1 from the CmdStan 2.39.0 integration run using the release's Bernoulli model and data, seed 12345, zero initialization, 100 warmup iterations, 31 sampling iterations, thinning by two and 17 significant digits. The two file paths and trailing whitespace were normalized. The cross-interface test compares every saved sampling column with CmdStanPy.
+
+`tests/fixtures/bernoulli-summary-2.40.0.csv` is the output of CmdStan 2.40.0 on Linux from `stansummary --sig_figs=17 --csv_filename=tests/fixtures/bernoulli-summary-2.40.0.csv tests/fixtures/bernoulli-2.39.0.csv`.

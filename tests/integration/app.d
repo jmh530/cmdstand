@@ -71,6 +71,7 @@ private void checkSummary(CmdStan stan, string[] paths, string directory)
             assert(value.isNaN ? table[row, column].isNaN : table[row, column] == value);
         }
     assertThrown!SummaryException(stan.summary());
+    assertThrown!SummaryException(stan.summary(paths[0], paths[0]));
     assertThrown!SummaryException(stan.summary(buildPath(directory, "missing.csv")));
     auto invalid = buildPath(directory, "invalid chain.csv");
     std.file.write(invalid, "not a sampling CSV\n");

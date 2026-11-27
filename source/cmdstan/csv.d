@@ -563,6 +563,8 @@ SummaryTable readSummaryCsv(string path)
     {
         ++number;
         auto record = line.strip;
+        enforce!CsvException(record.indexOf('\r') < 0,
+            path ~ "(" ~ number.to!string ~ "): unexpected carriage return");
         if (!record.length || record[0] == '#') continue;
         try
         {
@@ -613,9 +615,18 @@ unittest
     assertThrown!CsvException(t["x", "Mean"]);
     assertThrown!CsvException(t["A[1,2]", "missing"]);
     foreach (bad; ["", "name,Mean\n", "bad,Mean\nx,1", "name,M,M\nx,1,2",
-                   "name,M\nx,1\nx,2", "name,M\nx", "name,M\nx,1,2", "name,M\nx,3x"])
+                   "name,M\nx,1\nx,2", "name,M\nx", "name,M\nx,1,2", "name,M\nx,3x",
+                   "name,Mean\ntheta,1\rbeta,2\n", "name,Mean\ntheta,1\n# comment\rbeta,2\n"])
     {
         write(path, bad);
         assertThrown!CsvException(readSummaryCsv(path));
     }
+}
+
+unittest
+{
+    auto table = readSummaryCsv("tests/fixtures/bernoulli-summary-2.40.0.csv");
+    assert(table["theta", "R_hat"] == 0.99533925665013223);
+    assert(table["theta", "ESS_bulk"] == 14.683073348973082);
+    assert(table["theta", "ESS_tail"] == 8);
 }
