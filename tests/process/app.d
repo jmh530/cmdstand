@@ -14,8 +14,37 @@ import std.process : environment, spawnProcess, wait;
 import std.stdio : stdout, stderr;
 import std.uuid : randomUUID;
 
+private void checkSkippedDiagnoseInput(string root)
+{
+    import std.exception : collectException;
+    auto bin = buildPath(root, "bin");
+    mkdir(bin);
+    version (Windows) enum suffix = ".exe";
+    else enum suffix = "";
+    write(buildPath(root, "makefile"), "CMDSTAN_VERSION := 2.40.0\n");
+    write(buildPath(bin, "stanc" ~ suffix), "");
+    auto tool = buildPath(bin, "diagnose" ~ suffix);
+    copy(thisExePath(), tool);
+    version (Posix) setAttributes(tool, getAttributes(thisExePath()));
+
+    auto first = buildPath(root, "first chain.csv");
+    auto skipped = buildPath(root, "skipped chain.csv");
+    foreach (path; [first, skipped]) write(path, "divergent__\n0\n");
+    auto error = collectException!DiagnoseException(CmdStan.at(root).diagnose(first, skipped));
+    assert(error !is null, "diagnose accepted a partial report");
+    assert(error.msg.startsWith("File " ~ skipped ~ " not found"), error.msg);
+}
+
 int main(string[] args)
 {
+    if (stripExtension(baseName(args[0])) == "diagnose")
+    {
+        enforce(args.length == 3);
+        // CmdStan can skip a file and still report success for the other chain.
+        stdout.writeln("File ", args[2], " not found");
+        stdout.writeln("Processing complete, no problems detected.");
+        return 0;
+    }
     if (args.length > 1 && args[1] == "sample") return fakeChild(args);
     if (args.length == 3 && args[1] == "exit") return args[2].to!int;
     // Deterministically exercise cleanup after siblings have already exited.
@@ -34,6 +63,7 @@ int main(string[] args)
     environment["STAN_NUM_THREADS"] = "3";
     mkdir(root);
     scope (success) rmdirRecurse(root);
+    checkSkippedDiagnoseInput(root);
     version (Windows)
     {
         import cmdstan.internal.workspace : removeArtifactDirectory;

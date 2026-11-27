@@ -78,6 +78,37 @@ private void checkSummary(CmdStan stan, string[] paths, string directory)
     assertThrown!SummaryException(stan.summary(invalid));
 }
 
+private void checkDiagnose(CmdStan stan, string directory)
+{
+    import std.exception : assertThrown, collectException;
+    // Hand-authored projection of the divergent__ sampler column: four
+    // transitions per chain, with one divergence in the second chain.
+    auto first = buildPath(directory, "clean chain.csv");
+    auto second = buildPath(directory, "divergent chain.csv");
+    enum header = "# method = sample\n# algorithm = hmc\n# num_samples = 4\n";
+    std.file.write(first, header ~ "# id = 1\ndivergent__\n0\n0\n0\n0\n");
+    std.file.write(second, header ~ "# id = 2\ndivergent__\n0\n1\n0\n0\n");
+    version (Windows) enum tool = "diagnose.exe";
+    else enum tool = "diagnose";
+    foreach (paths; [[first], [first, second]])
+    {
+        auto direct = execute([buildPath(stan.path, "bin", tool)] ~ paths);
+        enforce(direct.status == 0, direct.output);
+        auto report = stan.diagnose(paths);
+        assert(report == direct.output);
+        assert(report.canFind(paths.length == 1 ? "no problems detected" :
+            "1 of 8 (12.50%) transitions ended with a divergence"));
+    }
+    assertThrown!DiagnoseException(stan.diagnose());
+    assertThrown!DiagnoseException(stan.diagnose(first, first));
+    assertThrown!DiagnoseException(stan.diagnose(first, buildPath(directory, "missing.csv")));
+    std.file.write(second, "# save_warmup = true\n# num_warmup = 4\ndivergent__\n0\n");
+    assertThrown!DiagnoseException(stan.diagnose(second));
+    std.file.write(second, "123\n");
+    auto failure = collectException!DiagnoseException(stan.diagnose(first, second));
+    assert(failure !is null && failure.msg.canFind("Cannot parse input csv file"), "Expected diagnose parse failure");
+}
+
 private void checkImportedChainIds(CompiledModel model, JsonFile data, string root)
 {
     import std.exception : assertThrown;
@@ -158,6 +189,7 @@ void main(string[] args)
     auto source = buildPath(root, "Bernoulli survey.stan");
     copy(args[1], source);
     auto stan = CmdStan.discover();
+    checkDiagnose(stan, root);
     checkPedanticWarnings(stan, root);
     auto broken = buildPath(root, "broken.stan");
     std.file.write(broken, "parameters { this is invalid Stan; }");

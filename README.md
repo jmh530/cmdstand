@@ -187,6 +187,18 @@ double rHat = stats["theta", "R_hat"];
 
 For a run retained with `SampleOptions.outputDir`, use the paths in `fit.artifacts.chains[i].csv`. Inspect `stats.rowNames` and `stats.columnNames` to discover available entries. For a matrix element, use the upstream label, for example `stats["A[1,2]", "Mean"]`. If you already have a summary CSV from `stansummary`, open it with `readSummaryCsv(path)` without a CmdStan installation.
 
+### Check sampler diagnostics
+
+Pass the saved chains from one HMC fit to `diagnose` to check for divergences, maximum tree depth, and other sampling problems. A completed check returns CmdStan's report, including any findings. A failed invocation raises `DiagnoseException` with the tool's error output.
+
+```d
+import cmdstan;
+import std.stdio : write;
+
+auto stan = CmdStan.discover();
+write(stan.diagnose("runs/chain-1/draws.csv", "runs/chain-2/draws.csv"));
+```
+
 ## Development
 
 - `dub test` runs fixture, discovery, and data tests.
