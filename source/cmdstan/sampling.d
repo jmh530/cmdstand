@@ -384,7 +384,7 @@ unittest
     write(a, fixture);
     foreach (bad; [second.replace("model = matrix_model", "model = other"),
                    second.replace("# model = matrix_model\n", ""),
-                   second.replace("# id = 2\n", ""), second.replace("num_samples = 3", "num_samples = 4"),
+                   second.replace("# id = 2", "# no recorded ID"), second.replace("num_samples = 3", "num_samples = 4"),
                    second.replace("lp__", "other"), second.replace("seed = 12", "seed = invalid")])
     {
         write(b, bad);
