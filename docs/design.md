@@ -12,6 +12,8 @@ When requested, pedantic warnings are enabled during Stan-to-C++ translation. A 
 
 Persistent caching needs the resolved transitive include graph, effective options, installation and compiler identity, platform, and build-local settings. An executable timestamp alone cannot capture these inputs. For explicit reuse, CompiledModel.save copies the executable and any adjacent Windows TBB runtime into a new caller-owned directory. CompiledModel.open borrows an executable by path. Closing a borrowed handle leaves the files in place. Opening does not recover build metadata or check source freshness.
 
+Native Windows and Linux probes on both supported releases found that Make can consider a model current after translation flags change, and that identical displayed compile commands can resolve different headers. The investigation proposes keeping fresh builds as the default and offering opt-in source-based reuse with a forced rebuild. [Build cache investigation](build-cache.md)
+
 `CompileOptions.enableThreads` requests `STAN_THREADS=true` on the Make command line. Its default leaves installation settings in effect. CmdStan 2.39.0 and 2.40.0 distinguish the threaded main object and precompiled model header by filename. The model itself builds in a fresh directory for each call.
 
 ## Chain and file ownership
