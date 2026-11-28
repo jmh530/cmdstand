@@ -10,7 +10,7 @@ CmdStanD runs `stanc --info` in the original model directory with an ordered inc
 
 When requested, pedantic warnings are enabled during Stan-to-C++ translation. A second Make file appends the flag after CmdStan loads its configuration, preserving installation flags. The model handle exposes the combined compiler and Make log through `buildLogPath` until close.
 
-Persistent caching needs the resolved transitive include graph, effective options, installation and compiler identity, platform, and build-local settings. An executable timestamp alone cannot capture these inputs. Explicit model-handle reuse avoids this ambiguity.
+Persistent caching needs the resolved transitive include graph, effective options, installation and compiler identity, platform, and build-local settings. An executable timestamp alone cannot capture these inputs. For explicit reuse, CompiledModel.save copies the executable and any adjacent Windows TBB runtime into a new caller-owned directory. CompiledModel.open borrows an executable by path. Closing a borrowed handle leaves the files in place. Opening does not recover build metadata or check source freshness.
 
 `CompileOptions.enableThreads` requests `STAN_THREADS=true` on the Make command line. Its default leaves installation settings in effect. CmdStan 2.39.0 and 2.40.0 distinguish the threaded main object and precompiled model header by filename. The model itself builds in a fresh directory for each call.
 
