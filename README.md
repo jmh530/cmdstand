@@ -129,6 +129,24 @@ Run the example from `examples/bernoulli` with `dub run`. The model compiles onc
 
 For direct control, use `writeStanJson(path, data)` and `runSample(executable, JsonFile(path), outputParent, options)`. The latter retains per-chain CSV, configuration, stdout and stderr below a unique run directory. The convenience API accepts the same `JsonFile`, a struct, string-keyed associative array, or named `JSONValue` object. Set `options.outputDir` to retain its artifacts. Otherwise it removes successful run files after parsing. Exceptions identify failed build or run directories for inspection and removal. Cooperative cancellation uses a `Cancellation` object in the options.
 
+### Save a model for later sessions
+
+`save` creates a directory and returns the absolute path to the executable inside it. Choose a new directory outside the temporary build. Keep the returned path for the next session.
+
+```d
+auto model = CmdStan.discover().compile("bernoulli.stan");
+scope (exit) model.close();
+auto savedPath = model.save("saved bernoulli");
+model.close();
+
+// In a later session, supply the saved path.
+auto savedModel = CompiledModel.open(savedPath);
+scope (exit) savedModel.close();
+auto fit = savedModel.sample(data);
+```
+
+You can also open an executable built directly by CmdStan. Opening borrows the file without running Make or looking up an installation. You own the saved files and decide when to rebuild after source changes. Keep the executable on a compatible system with its runtime libraries available. On Windows, saving also copies an adjacent `tbb.dll` when present.
+
 ### Choose initial parameter values
 
 Pass a named object as the third argument to `sample` to share one starting point across chains. Pass an array with one object for each chain to choose distinct starting points. Use the parameter names and constrained values from the Stan model. For example, a Bernoulli probability `theta` can start at 0.25:

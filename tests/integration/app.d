@@ -433,7 +433,16 @@ void main(string[] args)
         }
     }
     assert(exists(input.path) && exists(fit.artifacts.chains[0].csv));
+    auto saved = model.save(buildPath(root, "saved model"));
     model.close();
     assert(!exists(model.executable) && fit.chain(0).column("theta").length == 16);
+    auto restored = CompiledModel.open(saved);
+    scope (exit) restored.close();
+    o.outputDir = null;
+    auto repeated = restored.sample(input, o);
+    foreach (i; 0 .. repeated.chainCount)
+        assert(repeated.chain(i).column("theta") == fit.chain(i).column("theta"));
+    restored.close();
+    assert(exists(saved));
     writeln("Validated CmdStan ", stan.versionString, " in ", fit.artifacts.directory);
 }

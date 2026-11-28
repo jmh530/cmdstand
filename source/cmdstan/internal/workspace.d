@@ -9,6 +9,41 @@ package(cmdstan) string fullPath(string path)
     return buildNormalizedPath(absolutePath(path));
 }
 
+// Resolve an existing directory through filesystem links, including Windows junctions.
+package(cmdstan) string resolvedDirectory(string path)
+{
+    version (Windows)
+    {
+        import core.sys.windows.windows;
+        import std.utf : toUTF16z, toUTF8;
+        import std.windows.syserror : wenforce;
+        auto handle = CreateFileW(path.toUTF16z, 0,
+            FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE, null, OPEN_EXISTING,
+            FILE_FLAG_BACKUP_SEMANTICS, null);
+        wenforce(handle != INVALID_HANDLE_VALUE, "Opening directory " ~ path);
+        scope (exit) CloseHandle(handle);
+        wchar[] buffer;
+        for (;;)
+        {
+            auto length = GetFinalPathNameByHandleW(handle, buffer.ptr, cast(DWORD) buffer.length, 0);
+            wenforce(length, "Resolving directory " ~ path);
+            if (length < buffer.length) return toUTF8(buffer[0 .. length]);
+            buffer.length = length;
+        }
+    }
+    else version (Posix)
+    {
+        import core.stdc.stdlib : free;
+        import core.sys.posix.stdlib : realpath;
+        import std.exception : errnoEnforce;
+        import std.string : fromStringz, toStringz;
+        auto resolved = realpath(path.toStringz, null);
+        errnoEnforce(resolved !is null, "Resolving directory " ~ path);
+        scope (exit) free(resolved);
+        return resolved.fromStringz.idup;
+    }
+}
+
 package(cmdstan) string newDirectory(string parent, string prefix)
 {
     parent = fullPath(parent.length ? parent : tempDir());
